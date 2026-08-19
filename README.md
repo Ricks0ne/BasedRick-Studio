@@ -1,9 +1,7 @@
-Here is a comprehensive, production-grade **`README.md`** designed to match the standard of top Web3 protocols (like Manifold, Thirdweb, and Zora). It includes badges, system architecture diagrams, smart contract specifications, and environment setup guides.
 
-Copy the markdown below and paste it directly into your project's **`README.md`**:
 
-```markdown
-# ⚡ BasedRick Studio
+
+# BasedRick Studio
 
 <p align="center">
   <img src="https://img.shields.io/badge/Network-Base_Sepolia-0052FF?style=for-the-badge&logo=coinbase&logoColor=white" alt="Base Network" />
@@ -19,7 +17,7 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
 
 ---
 
-## 📌 Executive Summary
+##  Executive Summary
 
 **BasedRick Studio** is a Web3 capital formation and creator infrastructure suite. It lowers the barrier to entry for digital asset creation by combining:
 1. **Generative AI & IPFS Pipelines:** On-the-fly prompt matrix generation and automated ERC-721 metadata packaging.
@@ -28,12 +26,9 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
 
 ---
 
-## 🏗️ Architecture Overview
+##  Architecture Overview
 
 
-```
-
-```
                   ┌──────────────────────────────────────────────┐
                   │              Creator Studio (UI)             │
                   └──────┬────────────────────────────────┬──────┘
@@ -66,17 +61,15 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
                          │  - Native Fee/Royalty Splits  │
                          └───────────────────────────────┘
 
-```
 
-```
 
 ---
 
-## 🚀 Core Features
+##  Core Features
 
 ### 1. Dual-Mode Creator Studio
-* **🤖 AI Generator Pipeline:** Define narrative concepts and dynamic rarity distributions (Common to Mythic). Integrates high-throughput generative models via Pollinations.ai (FLUX) and automatically packages JSON metadata pinned to IPFS via Pinata.
-* **🎨 Traditional Custom Art:** Artists and 3D studios can bring their own pre-rendered assets and IPFS CIDs, bypassing AI generation to launch collections on-chain instantly.
+* ** AI Generator Pipeline:** Define narrative concepts and dynamic rarity distributions (Common to Mythic). Integrates high-throughput generative models via Pollinations.ai (FLUX) and automatically packages JSON metadata pinned to IPFS via Pinata.
+* ** Traditional Custom Art:** Artists and 3D studios can bring their own pre-rendered assets and IPFS CIDs, bypassing AI generation to launch collections on-chain instantly.
 
 ### 2. Launchpad & Smart Minting
 * **ERC-721A Standard:** Sequential batch minting optimized for ultra-low gas consumption.
@@ -95,7 +88,7 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
 
 ---
 
-## 📜 Smart Contract Suite
+##  Smart Contract Suite
 
 | Contract | Network | Address | Description |
 | :--- | :--- | :--- | :--- |
@@ -104,7 +97,7 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
 
 ---
 
-## 🛠️ Technology Stack
+##  Technology Stack
 
 * **Smart Contracts:** Solidity `^0.8.24`, OpenZeppelin Contracts, Hardhat
 * **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind CSS
@@ -114,7 +107,7 @@ Copy the markdown below and paste it directly into your project's **`README.md`*
 
 ---
 
-## 💻 Local Development & Setup
+##  Local Development & Setup
 
 ### Prerequisites
 * **Node.js:** `>= 18.17.0`
@@ -165,7 +158,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 🔐 Security & Engineering Patterns
+##  Security & Engineering Patterns
 
 * **Reentrancy Protection:** All financial state modifications in `BasedRickMarketplace` use OpenZeppelin's `ReentrancyGuard` and follow the Checks-Effects-Interactions pattern.
 * **Pull-Payment Pattern:** Offer bidding utilizes isolated escrow accounting (`escrowBalances`) requiring users to pull refunds rather than pushing ETH via unsafe external calls.
@@ -173,7 +166,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 🗺️ Product Roadmap
+##  Product Roadmap
 
 * [x] **Phase 1 (MVP):** Dual-Mode Creator Studio, Factory Deployer, and Secondary Escrow Marketplace on Base Sepolia.
 * [ ] **Phase 2 (Mainnet Migration):** Production deployment to Base Mainnet and verification on BaseScan.
@@ -182,23 +175,14 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 📄 License
+##  License
 
 This project is licensed under the **MIT License**.
 
-## 👤 Author
+##  Author
 
-**Ebubechukwu Fredrick Okolie**
+**Ricks**
 
 * *GitHub:* [@Ricks0ne](https://www.google.com/search?q=https://github.com/Ricks0ne)
 
-```
 
----
-
-### What Makes This README Stand Out:
-1. **Visual Hierarchy:** Uses clean shields/badges and an ASCII architecture flow that immediately communicates system design.
-2. **Web3 Native Terminology:** Accurately highlights design patterns like **Pull-Payments**, **ERC-721A batching**, **ERC-2981 royalties**, and **Checks-Effects-Interactions**.
-3. **Reviewer-Ready:** Any grant reviewer from the Base team or VC investor can look at this and immediately see the live contract addresses, tech stack, and modular roadmap.
-
-```

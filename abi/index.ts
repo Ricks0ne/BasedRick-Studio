@@ -2,9 +2,9 @@ import FactoryData from "./LaunchpadFactory.json";
 import LaunchpadData from "./BasedRickLaunchpad.json";
 import MarketplaceData from "./BasedRickMarketplace.json";
 
-export const LAUNCHPAD_FACTORY_ABI = FactoryData.abi;
-export const BASEDRICK_LAUNCHPAD_ABI = LaunchpadData.abi;
-export const MARKETPLACE_ABI = MarketplaceData.abi;
+export const LAUNCHPAD_FACTORY_ABI = FactoryData.abi as const;
+export const BASEDRICK_LAUNCHPAD_ABI = LaunchpadData.abi as const;
+export const MARKETPLACE_ABI = MarketplaceData.abi as const;
 
 // Contract Addresses (Base Sepolia)
 export const LAUNCHPAD_FACTORY_ADDRESS =
@@ -13,3 +13,6 @@ export const LAUNCHPAD_FACTORY_ADDRESS =
 // ⚡ UPDATED to the new Marketplace with Expirations
 export const MARKETPLACE_ADDRESS =
   "0x0E203E4Af9351849EE2C30d812b83c5852387445" as `0x${string}`;
+
+
+

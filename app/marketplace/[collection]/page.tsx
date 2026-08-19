@@ -71,7 +71,7 @@ export default function CollectionMarketplacePage() {
         calls.push({ address: MARKETPLACE_ADDRESS, abi: MARKETPLACE_ABI, functionName: "listings", args: [collectionAddress, BigInt(i)] });
       }
 
-      const results = await publicClient.multicall({ contracts: calls });
+      const results = await publicClient!.multicall({ contracts: calls });
       
       const loadedItems: NFTItem[] = [];
       const resolveIpfs = (url: string) => url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;

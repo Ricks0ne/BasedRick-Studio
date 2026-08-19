@@ -1,0 +1,46 @@
+[
+  {
+    "owner": "0x21ec48d770a77a2f7469693d2fb7c75b68c8b0ac",
+    "address": "0xC3dAf64948631A41d10e6D326E76Ea98c34Cd5CB",
+    "name": "Rick Sanchez",
+    "symbol": "RICK SANCHEZ",
+    "baseUri": "",
+    "maxSupply": 0,
+    "publicPrice": "0",
+    "whitelistPrice": "0",
+    "createdAt": 1786886382971
+  },
+  {
+    "owner": "0x21ec48d770a77a2f7469693d2fb7c75b68c8b0ac",
+    "address": "0xD47B01d5B2EA0905cC2038Bb5cD819A5EA379e1E",
+    "name": "Rick Sanchez",
+    "symbol": "RICK SANCHEZ",
+    "baseUri": "",
+    "maxSupply": 0,
+    "publicPrice": "0",
+    "whitelistPrice": "0",
+    "createdAt": 1786886382984
+  },
+  {
+    "owner": "0x21ec48d770a77a2f7469693d2fb7c75b68c8b0ac",
+    "address": "0x150bec5BDD320445A8Af1b8dc1299bB51e1277F6",
+    "name": "Rick Sanchez",
+    "symbol": "RICK SANCHEZ",
+    "baseUri": "",
+    "maxSupply": 0,
+    "publicPrice": "0",
+    "whitelistPrice": "0",
+    "createdAt": 1786886382997
+  },
+  {
+    "owner": "0x21ec48d770a77a2f7469693d2fb7c75b68c8b0ac",
+    "address": "0x106C37567eA0c17B6be9e91B7a6A7752C17a3C8A",
+    "name": "Rick Sanchez",
+    "symbol": "RICK SANCHEZ,",
+    "baseUri": "ipfs://QmavaGQbn9uj1GV1xAh7LrJwquDRmh5HfhsWEwbLNhbsos/",
+    "maxSupply": 10,
+    "publicPrice": "0.002",
+    "whitelistPrice": "0.001",
+    "createdAt": 1786889451505
+  }
+]

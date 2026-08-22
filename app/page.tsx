@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePublicClient } from "wagmi";
 import { LAUNCHPAD_FACTORY_ABI, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
+// ⚡ IMPORT GLOBAL CACHE
+import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
@@ -23,11 +25,6 @@ export default function Home() {
   const publicClient = usePublicClient();
   const [trendingCollections, setTrendingCollections] = useState<CollectionData[]>([]);
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
-
-  const resolveIpfs = (url?: string) => {
-    if (!url) return "";
-    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
-  };
 
   // ⚡ DYNAMIC TRENDING FEED (Fetches the 4 newest collections)
   useEffect(() => {
@@ -92,9 +89,10 @@ export default function Home() {
 
           if (uri) {
              try {
-                fetch(resolveIpfs(uri)).then(r => r.json()).then(meta => {
-                   if (meta.image) {
-                     setTrendingCollections(prev => prev.map(c => c.address === top4[i] ? { ...c, coverImage: resolveIpfs(meta.image) } : c));
+                // ⚡ IMPLEMENTED GLOBAL CACHE HERE
+                fetchMetadataWithCache(uri).then(meta => {
+                   if (meta && meta.image) {
+                     setTrendingCollections(prev => prev.map(c => c.address === top4[i] ? { ...c, coverImage: resolveIpfsUrl(meta.image) } : c));
                    }
                 }).catch(() => {});
              } catch (e) {}
@@ -122,7 +120,6 @@ export default function Home() {
   }, [publicClient]);
 
   return (
-   
       <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-blue-500/30 overflow-hidden relative">
         
         {/* Dynamic Background Effects */}
@@ -257,7 +254,7 @@ export default function Home() {
                           <img src={collection.coverImage} alt={collection.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
                        ) : (
                           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-black text-4xl">
-                             👾
+                              👾
                           </div>
                        )}
                        

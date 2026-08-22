@@ -6,6 +6,8 @@ import { useAccount, useReadContracts, useWriteContract, usePublicClient } from 
 import { formatEther, parseEther } from "viem";
 import toast from "react-hot-toast";
 import { MARKETPLACE_ABI, MARKETPLACE_ADDRESS, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
+// ⚡ IMPORT GLOBAL CACHE
+import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
 interface NFTItem {
   tokenId: number;
@@ -30,7 +32,7 @@ export default function CollectionMarketplacePage() {
   const [items, setItems] = useState<NFTItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   
-  // ⚡ NEW: Last Sale Tracking State
+  // ⚡ Last Sale Tracking State
   const [lastSalePrice, setLastSalePrice] = useState<bigint | null>(null);
   
   // ⚡ PRO LAYOUT & SWEEPER STATE
@@ -40,7 +42,7 @@ export default function CollectionMarketplacePage() {
   const [selectedTiers, setSelectedTiers] = useState<string[]>([]);
   const [sortOption, setSortOption] = useState("price_asc");
   
-  // 🛒 NEW: Cart State
+  // 🛒 Cart State
   const [cart, setCart] = useState<NFTItem[]>([]);
 
   // Modal States
@@ -64,31 +66,6 @@ export default function CollectionMarketplacePage() {
   const collectionName = collectionData?.[0]?.result as string | undefined;
   const symbol = collectionData?.[1]?.result as string | undefined;
   const totalSupply = collectionData?.[2]?.result as bigint | undefined;
-
-  const resolveIpfs = (url?: string) => {
-    if (!url) return "";
-    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
-  };
-
-  const fetchWithFallback = async (uri: string) => {
-    if (!uri.startsWith("ipfs://")) {
-      const res = await fetch(uri);
-      return res.json();
-    }
-    const cidPath = uri.replace("ipfs://", "");
-    const gateways = [
-      "https://gateway.pinata.cloud/ipfs/",
-      "https://dweb.link/ipfs/",
-      "https://ipfs.io/ipfs/"
-    ];
-    for (const gateway of gateways) {
-      try {
-        const res = await fetch(`${gateway}${cidPath}`);
-        if (res.ok) return await res.json();
-      } catch (e) {}
-    }
-    throw new Error("All IPFS gateways failed.");
-  };
 
   const loadMarketplaceData = async () => {
     if (!collectionAddress || !publicClient || totalSupply === undefined) return;
@@ -136,12 +113,13 @@ export default function CollectionMarketplacePage() {
         
         if (uriRes?.status === "success" && uriRes.result) {
           metadataPromises.push(
-            fetchWithFallback(uriRes.result as string).then(meta => {
+            // ⚡ IMPLEMENTED GLOBAL CACHE HERE
+            fetchMetadataWithCache(uriRes.result as string).then(meta => {
                const rarityAttr = meta.attributes?.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
                return {
                  ...baseItem,
                  name: meta.name || baseItem.name,
-                 image: resolveIpfs(meta.image),
+                 image: resolveIpfsUrl(meta.image),
                  tier: rarityAttr ? String(rarityAttr.value) : "Common"
                };
             }).catch(() => baseItem)
@@ -234,7 +212,7 @@ export default function CollectionMarketplacePage() {
     setSelectedTiers(prev => prev.includes(tier) ? prev.filter(t => t !== tier) : [...prev, tier]);
   };
 
-  // 🛒 NEW: Cart Toggles
+  // 🛒 Cart Toggles
   const toggleCartItem = (item: NFTItem) => {
     if (cart.find(i => i.tokenId === item.tokenId)) {
       setCart(cart.filter(i => i.tokenId !== item.tokenId));

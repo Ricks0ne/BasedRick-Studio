@@ -4,11 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePublicClient } from "wagmi";
 import { LAUNCHPAD_FACTORY_ABI, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
-
+// ⚡ IMPORT GLOBAL CACHE
+import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
-// ⚡ ADDED: Chunk size constraint
 const CHUNK_SIZE = 2000n;
 
 interface CollectionData {
@@ -27,11 +27,6 @@ export default function MarketplaceHubPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "live">("all");
 
-  const resolveIpfs = (url?: string) => {
-    if (!url) return "";
-    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
-  };
-
   useEffect(() => {
     const fetchEcosystem = async () => {
       if (!publicClient) return;
@@ -41,7 +36,6 @@ export default function MarketplaceHubPage() {
         const currentBlock = await publicClient.getBlockNumber();
         const startBlock = FACTORY_DEPLOY_BLOCK > currentBlock ? currentBlock : FACTORY_DEPLOY_BLOCK;
         
-        // ⚡ NEW: Safe block chunking loop to bypass the 10k RPC limit
         let allLogs: any[] = [];
         for (let from = startBlock; from <= currentBlock; from += CHUNK_SIZE) {
           const to = from + CHUNK_SIZE - 1n > currentBlock ? currentBlock : from + CHUNK_SIZE - 1n;
@@ -93,10 +87,10 @@ export default function MarketplaceHubPage() {
           let coverImage = "";
           if (uri) {
              try {
-                // Background fetch for the cover image
-                fetch(resolveIpfs(uri)).then(r => r.json()).then(meta => {
-                   if (meta.image) {
-                     setCollections(prev => prev.map(c => c.address === addresses[i] ? { ...c, coverImage: resolveIpfs(meta.image) } : c));
+                // ⚡ IMPLEMENTED GLOBAL CACHE HERE
+                fetchMetadataWithCache(uri).then(meta => {
+                   if (meta && meta.image) {
+                     setCollections(prev => prev.map(c => c.address === addresses[i] ? { ...c, coverImage: resolveIpfsUrl(meta.image) } : c));
                    }
                 }).catch(() => {});
              } catch (e) {}
@@ -129,7 +123,6 @@ export default function MarketplaceHubPage() {
   const totalEcosystemItems = collections.reduce((sum, c) => sum + c.totalSupply, 0);
 
   return (
-    
       <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
         
         {/* HERO SECTION */}
@@ -208,7 +201,7 @@ export default function MarketplaceHubPage() {
                           <img src={collection.coverImage} alt={collection.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
                        ) : (
                           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-black text-4xl">
-                             👾
+                              👾
                           </div>
                        )}
                        

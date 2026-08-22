@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePublicClient } from "wagmi";
 import { formatEther } from "viem";
 import { LAUNCHPAD_FACTORY_ABI, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
+import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
@@ -28,11 +29,6 @@ export default function LaunchpadFeedPage() {
   const [drops, setDrops] = useState<DropData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "live" | "soldout">("all");
-
-  const resolveIpfs = (url?: string) => {
-    if (!url) return "";
-    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
-  };
 
   useEffect(() => {
     const fetchDrops = async () => {
@@ -98,9 +94,9 @@ export default function LaunchpadFeedPage() {
 
           if (uri) {
              try {
-                fetch(resolveIpfs(uri)).then(r => r.json()).then(meta => {
-                   if (meta.image) {
-                     setDrops(prev => prev.map(d => d.address === addresses[i] ? { ...d, coverImage: resolveIpfs(meta.image) } : d));
+                fetchMetadataWithCache(uri).then(meta => {
+                   if (meta && meta.image) {
+                     setDrops(prev => prev.map(d => d.address === addresses[i] ? { ...d, coverImage: resolveIpfsUrl(meta.image) } : d));
                    }
                 }).catch(() => {});
              } catch (e) {}
@@ -135,7 +131,6 @@ export default function LaunchpadFeedPage() {
   if (filter === "soldout") displayDrops = drops.filter(d => d.totalSupply >= d.maxSupply && d.maxSupply > 0);
 
   return (
-    
       <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
         
         {/* HERO SECTION */}
@@ -220,7 +215,7 @@ export default function LaunchpadFeedPage() {
                           <img src={drop.coverImage} alt={drop.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
                        ) : (
                           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-black text-4xl">
-                             👾
+                              👾
                           </div>
                        )}
                        
@@ -295,6 +290,5 @@ export default function LaunchpadFeedPage() {
           )}
         </div>
       </div>
-    
   );
 }

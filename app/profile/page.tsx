@@ -11,7 +11,8 @@ import {
   MARKETPLACE_ABI, 
   MARKETPLACE_ADDRESS 
 } from "@/abi";
-
+// ⚡ IMPORT GLOBAL CACHE
+import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
@@ -252,33 +253,6 @@ export default function ProfilePage() {
     }
   };
 
-  // ⚡ PUBLIC RPC IPFS RESOLVERS
-  const resolveIpfsUrl = (url?: string) => {
-    if (!url) return "";
-    if (url.startsWith("ipfs://")) return url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
-    return url;
-  };
-
-  const fetchWithFallback = async (uri: string) => {
-    if (!uri.startsWith("ipfs://")) {
-      const res = await fetch(uri);
-      return res.json();
-    }
-    const cidPath = uri.replace("ipfs://", "");
-    const gateways = [
-      "https://gateway.pinata.cloud/ipfs/",
-      "https://dweb.link/ipfs/",
-      "https://ipfs.io/ipfs/"
-    ];
-    for (const gateway of gateways) {
-      try {
-        const res = await fetch(`${gateway}${cidPath}`);
-        if (res.ok) return await res.json();
-      } catch (e) {}
-    }
-    throw new Error("All IPFS gateways failed.");
-  };
-
   useEffect(() => {
     const fetchOffers = async () => {
       if (!address || !publicClient) return;
@@ -432,7 +406,7 @@ export default function ProfilePage() {
     fetchReceivedOffers();
   }, [address, publicClient, ownedNFTs, refreshTrigger]);
 
-  // ⚡ OPTIMIZED PUBLIC RPC INVENTORY FETCH
+  // ⚡ OPTIMIZED PUBLIC RPC INVENTORY FETCH WITH CACHE
   useEffect(() => {
     const fetchInventory = async () => {
       if (!address || !publicClient) return;
@@ -569,7 +543,8 @@ export default function ProfilePage() {
 
           if (uri) {
             metadataPromises.push(
-              fetchWithFallback(uri).then(meta => {
+              // ⚡ IMPLEMENTED GLOBAL CACHE HERE
+              fetchMetadataWithCache(uri).then(meta => {
                 const rarityAttr = meta.attributes?.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
                 return {
                   ...baseNFT,
@@ -602,7 +577,6 @@ export default function ProfilePage() {
   const totalActiveBidsValue = activeOffers.reduce((sum, o) => sum + o.amount, 0n);
 
   return (
-    
       <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
         
         <div className="border-b border-gray-800 bg-[#0a0a0a] relative overflow-hidden">

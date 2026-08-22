@@ -13,7 +13,6 @@ import { MerkleTree } from "merkletreejs";
 import keccak256 from "keccak256";
 import toast from "react-hot-toast";
 import { BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
-import BetaGate from "@/components/BetaGate";
 
 interface MintedToken {
   tokenId: number;
@@ -134,7 +133,6 @@ export default function CollectionMintPage() {
 
   const isOwner = userAddress && ownerAddress && userAddress.toLowerCase() === ownerAddress.toLowerCase();
 
-  // --- Limits & Dynamic Pricing Logic ---
   const maxWl = maxPerWalletWhitelist ? Number(maxPerWalletWhitelist) : 0;
   const maxPub = maxPerWalletPublic ? Number(maxPerWalletPublic) : 0;
   const wlMinted = userWlMintCount ? Number(userWlMintCount) : 0;
@@ -173,27 +171,24 @@ export default function CollectionMintPage() {
       const res = await fetch(uri);
       return res.json();
     }
-    
     const cidPath = uri.replace("ipfs://", "");
     const gateways = [
       "https://gateway.pinata.cloud/ipfs/",
       "https://dweb.link/ipfs/",
       "https://ipfs.io/ipfs/"
     ];
-    
     for (const gateway of gateways) {
       try {
         const res = await fetch(`${gateway}${cidPath}`);
         if (res.ok) return await res.json();
-      } catch (e) {
-        console.warn(`Gateway ${gateway} failed, trying next...`);
-      }
+      } catch (e) {}
     }
     throw new Error("All IPFS gateways failed.");
   };
 
   const totalSupplyStr = totalSupply?.toString();
 
+  // ⚡ OPTIMIZED PUBLIC RPC INTEGRATION
   useEffect(() => {
     if (!contractAddress || !publicClient || totalSupplyStr === undefined) return;
     const count = Number(totalSupplyStr);
@@ -205,48 +200,53 @@ export default function CollectionMintPage() {
     const loadMintedTokens = async () => {
       setIsLoadingGallery(true);
       try {
-        const tokenPromises = [];
+        const calls = [];
         for (let id = 1; id <= count; id++) {
-          tokenPromises.push((async () => {
-            try {
-              const uri = await publicClient.readContract({
-                address: contractAddress,
-                abi: BASEDRICK_LAUNCHPAD_ABI,
-                functionName: "tokenURI",
-                args: [BigInt(id)],
-              }) as string;
-
-              const tokenOwner = await publicClient.readContract({
-                address: contractAddress,
-                abi: BASEDRICK_LAUNCHPAD_ABI,
-                functionName: "ownerOf",
-                args: [BigInt(id)],
-              }) as string;
-
-              if (!uri) throw new Error("No URI");
-
-              const metadata = await fetchWithFallback(uri);
-              const rarityAttr = metadata.attributes?.find(
-                (a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier"
-              );
-
-              return {
-                tokenId: id,
-                owner: tokenOwner,
-                name: metadata.name || `Token #${id}`,
-                description: metadata.description,
-                image: resolveIpfsUrl(metadata.image),
-                tier: rarityAttr ? String(rarityAttr.value) : "Common",
-                attributes: metadata.attributes || [],
-              };
-            } catch (e) {
-              return { tokenId: id, name: `Token #${id}`, tier: "Unknown" };
-            }
-          })());
+          calls.push({ address: contractAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "tokenURI", args: [BigInt(id)] });
+          calls.push({ address: contractAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "ownerOf", args: [BigInt(id)] });
         }
-
-        const loaded = await Promise.all(tokenPromises);
-        setMintedTokens(loaded.reverse());
+        
+        const multicallRes = await publicClient.multicall({ contracts: calls });
+        const metadataPromises = [];
+                
+        for (let i = 0; i < count; i++) {
+          const tokenId = i + 1;
+          const uriRes = multicallRes[i * 2];
+          const ownerRes = multicallRes[i * 2 + 1];
+          const owner = ownerRes.status === "success" ? ownerRes.result as string : undefined;
+          
+          const baseItem = { 
+            tokenId, 
+            owner, 
+            name: `Token #${tokenId}`, 
+            description: "", 
+            image: "", 
+            tier: "Common", 
+            attributes: [] 
+          };
+          
+          if (uriRes.status === "success" && uriRes.result) {
+            metadataPromises.push(
+              fetchWithFallback(uriRes.result as string).then(meta => {
+                const attrs = meta.attributes || [];
+                const rarityAttr = attrs.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
+                return {
+                  ...baseItem,
+                  name: meta.name || baseItem.name,
+                  description: meta.description || "",
+                  image: resolveIpfsUrl(meta.image),
+                  tier: rarityAttr ? String(rarityAttr.value) : "Common",
+                  attributes: attrs
+                };
+              }).catch(() => baseItem)
+            );
+          } else {
+            metadataPromises.push(Promise.resolve(baseItem));
+          }
+        }
+        
+        const resolvedItems = await Promise.all(metadataPromises);
+        setMintedTokens(resolvedItems.reverse());
       } catch (err) {
         console.error("Failed to load gallery items:", err);
       } finally {
@@ -483,7 +483,7 @@ export default function CollectionMintPage() {
   const totalCap = maxSupply !== undefined ? maxSupply.toString() : "0";
 
   return (
-    <BetaGate>
+    
       <div className="max-w-6xl mx-auto px-4 py-12 text-white">
         {/* Header Banner */}
         <div className="bg-gray-900/80 border border-gray-800 rounded-2xl p-8 mb-8 backdrop-blur">
@@ -951,6 +951,6 @@ export default function CollectionMintPage() {
           </div>
         )}
       </div>
-    </BetaGate>
+    
   );
 }

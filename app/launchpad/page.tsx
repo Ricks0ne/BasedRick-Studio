@@ -7,41 +7,44 @@ import { formatEther } from "viem";
 import { LAUNCHPAD_FACTORY_ABI, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
 import BetaGate from "@/components/BetaGate";
 
-const FACTORY_ADDRESS = "0x66E16D8B540Ad20834b6f0a8115C8C039353F5bE" as `0x${string}`;
-const FACTORY_DEPLOY_BLOCK = 45500000n; 
-const CHUNK_SIZE = 9000n;
+const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
+const FACTORY_DEPLOY_BLOCK = 45796720n;
+const CHUNK_SIZE = 2000n;
 
-// Helper to prevent RPC rate limiting
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-
-interface EnrichedCollection {
+interface DropData {
+  address: string;
   name: string;
   symbol: string;
-  address: string;
-  owner: string;
-  minted: number;
+  totalSupply: number;
   maxSupply: number;
-  publicPrice: string;
-  isLive: boolean;
+  isPublicLive: boolean;
+  isWlLive: boolean;
+  publicPrice: bigint;
+  wlPrice: bigint;
+  coverImage?: string;
 }
 
-export default function LaunchpadDiscoveryPage() {
+export default function LaunchpadFeedPage() {
   const publicClient = usePublicClient();
-  const [collections, setCollections] = useState<EnrichedCollection[]>([]);
+  const [drops, setDrops] = useState<DropData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "live" | "soldout">("all");
+
+  const resolveIpfs = (url?: string) => {
+    if (!url) return "";
+    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
+  };
 
   useEffect(() => {
-    const fetchGlobalOnChainCollections = async () => {
+    const fetchDrops = async () => {
       if (!publicClient) return;
-
       setIsLoading(true);
+      
       try {
         const currentBlock = await publicClient.getBlockNumber();
         const startBlock = FACTORY_DEPLOY_BLOCK > currentBlock ? currentBlock : FACTORY_DEPLOY_BLOCK;
         
         let allLogs: any[] = [];
-
         for (let from = startBlock; from <= currentBlock; from += CHUNK_SIZE) {
           const to = from + CHUNK_SIZE - 1n > currentBlock ? currentBlock : from + CHUNK_SIZE - 1n;
           try {
@@ -53,198 +56,246 @@ export default function LaunchpadDiscoveryPage() {
               toBlock: to,
             });
             allLogs = [...allLogs, ...chunkLogs];
-            
-            // Wait 250ms before asking for the next chunk to respect rate limits
-            await delay(250);
-            
-          } catch (chunkErr) {
-            console.warn(`Chunk fetch failed: ${from}-${to}`, chunkErr);
-            // If we hit a rate limit error, wait a full second before continuing
-            await delay(1000);
+          } catch (e) {
+            console.warn(`Skipped log chunk from ${from} to ${to}`);
           }
         }
 
-        const uniqueAddresses = new Set();
-        const rawCollections = allLogs
-          .reverse()
-          .filter((log: any) => {
-            const addr = log.args.collectionAddress.toLowerCase();
-            if (uniqueAddresses.has(addr)) return false;
-            uniqueAddresses.add(addr);
-            return true;
-          })
-          .map((log: any) => ({
-            address: log.args.collectionAddress,
-            name: log.args.name,
-            symbol: log.args.symbol,
-            owner: log.args.owner,
-          }));
+        const addresses = Array.from(new Set(allLogs.map(log => log.args.collectionAddress as `0x${string}`)));
 
-        // Multicall for live on-chain stats
-        const enrichedPromises = rawCollections.map(async (col) => {
-          try {
-            const stats = await publicClient.multicall({
-              contracts: [
-                { address: col.address as `0x${string}`, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: 'totalSupply' },
-                { address: col.address as `0x${string}`, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: 'maxSupply' },
-                { address: col.address as `0x${string}`, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: 'isPublicSaleActive' },
-                { address: col.address as `0x${string}`, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: 'publicPrice' },
-              ]
-            });
-            
-            return {
-              ...col,
-              minted: stats[0].status === "success" ? Number(stats[0].result) : 0,
-              maxSupply: stats[1].status === "success" ? Number(stats[1].result) : 0,
-              isLive: stats[2].status === "success" ? Boolean(stats[2].result) : false,
-              publicPrice: stats[3].status === "success" ? formatEther(stats[3].result as bigint) : "0",
-            };
-          } catch (e) {
-            return { ...col, minted: 0, maxSupply: 0, isLive: false, publicPrice: "0" };
+        if (addresses.length === 0) {
+          setDrops([]);
+          setIsLoading(false);
+          return;
+        }
+
+        const calls = [];
+        for (const addr of addresses) {
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "name" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "symbol" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "totalSupply" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "maxSupply" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "isPublicSaleActive" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "isWhitelistActive" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "publicPrice" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "whitelistPrice" });
+          calls.push({ address: addr, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "tokenURI", args: [1n] });
+        }
+
+        const results = await publicClient.multicall({ contracts: calls });
+        
+        const loaded: DropData[] = [];
+        for (let i = 0; i < addresses.length; i++) {
+          const offset = i * 9;
+          const name = results[offset].status === "success" ? results[offset].result as string : "Unknown";
+          const symbol = results[offset + 1].status === "success" ? results[offset + 1].result as string : "???";
+          const totalSupply = results[offset + 2].status === "success" ? Number(results[offset + 2].result) : 0;
+          const maxSupply = results[offset + 3].status === "success" ? Number(results[offset + 3].result) : 0;
+          const isPublicLive = results[offset + 4].status === "success" ? results[offset + 4].result as boolean : false;
+          const isWlLive = results[offset + 5].status === "success" ? results[offset + 5].result as boolean : false;
+          const publicPrice = results[offset + 6].status === "success" ? results[offset + 6].result as bigint : 0n;
+          const wlPrice = results[offset + 7].status === "success" ? results[offset + 7].result as bigint : 0n;
+          const uri = results[offset + 8].status === "success" ? results[offset + 8].result as string : null;
+
+          if (uri) {
+             try {
+                fetch(resolveIpfs(uri)).then(r => r.json()).then(meta => {
+                   if (meta.image) {
+                     setDrops(prev => prev.map(d => d.address === addresses[i] ? { ...d, coverImage: resolveIpfs(meta.image) } : d));
+                   }
+                }).catch(() => {});
+             } catch (e) {}
           }
-        });
 
-        const finalData = await Promise.all(enrichedPromises);
-        setCollections(finalData);
-      } catch (err) {
-        console.error("Failed to load global collections:", err);
+          loaded.push({
+            address: addresses[i],
+            name,
+            symbol,
+            totalSupply,
+            maxSupply,
+            isPublicLive,
+            isWlLive,
+            publicPrice,
+            wlPrice
+          });
+        }
+
+        setDrops(loaded.reverse());
+      } catch (error) {
+        console.error("Failed to fetch launchpad drops", error);
       } finally {
         setIsLoading(false);
       }
     };
 
-    fetchGlobalOnChainCollections();
+    fetchDrops();
   }, [publicClient]);
 
-  const filteredCollections = collections.filter(c => 
-    c.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    c.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    c.address.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  let displayDrops = drops;
+  if (filter === "live") displayDrops = drops.filter(d => (d.isPublicLive || d.isWlLive) && d.totalSupply < d.maxSupply);
+  if (filter === "soldout") displayDrops = drops.filter(d => d.totalSupply >= d.maxSupply && d.maxSupply > 0);
 
   return (
     <BetaGate>
-      <main className="max-w-7xl mx-auto px-4 pb-12 text-white">
-        {/* Hero Section */}
-        <div className="bg-gradient-to-br from-blue-900/40 to-purple-900/40 border border-blue-800/50 rounded-3xl p-10 mb-12 text-center relative overflow-hidden">
-          <div className="absolute top-[-50%] left-[-10%] w-96 h-96 bg-blue-500/20 rounded-full blur-[100px]"></div>
-          <div className="absolute bottom-[-50%] right-[-10%] w-96 h-96 bg-purple-500/20 rounded-full blur-[100px]"></div>
+      <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
+        
+        {/* HERO SECTION */}
+        <div className="relative overflow-hidden border-b border-gray-800 bg-[#0a0a0a]">
+          <div className="absolute top-0 right-1/4 w-[600px] h-[400px] bg-blue-600/10 blur-[100px] rounded-full pointer-events-none"></div>
           
-          <div className="relative z-10">
-            <span className="text-sm font-bold tracking-widest text-blue-400 uppercase mb-4 block">
-              The Base Sepolia Network
-            </span>
-            <h1 className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400 mb-6">
-              Discover Next-Gen Drops
-            </h1>
-            <p className="text-lg text-gray-300 max-w-2xl mx-auto mb-8">
-              Explore and mint AI-generated NFT collections entirely on-chain through the BasedRick Launchpad infrastructure.
-            </p>
+          <div className="max-w-[1600px] mx-auto px-6 py-20 relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-8">
+            <div>
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-900/30 border border-blue-500/30 text-[10px] font-bold text-blue-400 mb-4 uppercase tracking-widest">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+                Primary Market
+              </div>
+              <h1 className="text-5xl md:text-6xl font-black text-white mb-4 tracking-tight">Active Drops</h1>
+              <p className="text-xl text-gray-400 max-w-xl leading-relaxed">
+                Be the first to mint. Discover and collect directly from verified creator smart contracts.
+              </p>
+            </div>
+            
             <Link 
-              href="/launchpad/create"
-              className="inline-block px-8 py-4 bg-white text-black font-extrabold rounded-xl hover:bg-gray-200 transition shadow-[0_0_20px_rgba(255,255,255,0.3)]"
+              href="/launchpad/create" 
+              className="px-8 py-4 bg-white text-black font-black rounded-xl shadow-[0_0_20px_rgba(255,255,255,0.15)] hover:bg-gray-200 transition text-sm whitespace-nowrap"
             >
-              Launch Your Own Collection
+              Deploy Your Own Drop
             </Link>
           </div>
         </div>
 
-        {/* Controls & Search */}
-        <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
-          <h2 className="text-3xl font-bold text-gray-100 flex items-center gap-3">
-            <span className="text-blue-500">⚡</span> Active Drops
-            <span className="text-sm font-mono bg-gray-800 text-gray-400 px-3 py-1 rounded-full border border-gray-700">
-              {collections.length} Total
-            </span>
-          </h2>
-
-          <div className="w-full md:w-96 relative">
-            <input 
-              type="text" 
-              placeholder="Search by name, symbol, or address..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-gray-900/80 border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500 transition"
-            />
-            <span className="absolute left-4 top-3 text-gray-500">🔍</span>
+        {/* WORKSPACE & GRID */}
+        <div className="max-w-[1600px] mx-auto px-6 py-12">
+          
+          {/* TOOLBAR */}
+          <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
+            <div className="flex gap-2 bg-gray-900 p-1 rounded-lg border border-gray-800">
+                <button 
+                    onClick={() => setFilter("all")}
+                    className={`px-5 py-2 rounded-md text-sm font-bold transition ${filter === "all" ? "bg-gray-700 text-white shadow" : "text-gray-400 hover:text-white"}`}
+                >
+                    All Drops
+                </button>
+                <button 
+                    onClick={() => setFilter("live")}
+                    className={`px-5 py-2 rounded-md text-sm font-bold transition flex items-center gap-2 ${filter === "live" ? "bg-gray-700 text-white shadow" : "text-gray-400 hover:text-white"}`}
+                >
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    Live Now
+                </button>
+                <button 
+                    onClick={() => setFilter("soldout")}
+                    className={`px-5 py-2 rounded-md text-sm font-bold transition ${filter === "soldout" ? "bg-gray-700 text-white shadow" : "text-gray-400 hover:text-white"}`}
+                >
+                    Sold Out
+                </button>
+            </div>
           </div>
+
+          {/* GRID */}
+          {isLoading ? (
+             <div className="py-32 flex flex-col items-center gap-4">
+                <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-xs text-gray-500 font-bold tracking-widest uppercase">Fetching Mint Schedules...</p>
+             </div>
+          ) : displayDrops.length === 0 ? (
+             <div className="py-32 text-center bg-gray-900/20 border border-gray-800/50 rounded-3xl">
+                <span className="text-5xl block mb-4 opacity-50">📭</span>
+                <p className="text-xl font-bold text-gray-300">No drops found for this filter.</p>
+             </div>
+          ) : (
+             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+               {displayDrops.map((drop) => {
+                 const isSoldOut = drop.totalSupply >= drop.maxSupply && drop.maxSupply > 0;
+                 const isLive = (drop.isPublicLive || drop.isWlLive) && !isSoldOut;
+                 const progressPercent = drop.maxSupply > 0 ? (drop.totalSupply / drop.maxSupply) * 100 : 0;
+
+                 return (
+                 <Link 
+                   href={`/launchpad/${drop.address}`} 
+                   key={drop.address}
+                   className="bg-[#121212] border border-gray-800 rounded-2xl overflow-hidden hover:border-gray-500 transition group flex flex-col relative shadow-xl hover:shadow-2xl"
+                 >
+                    <div className="aspect-[4/3] bg-black relative overflow-hidden border-b border-gray-800">
+                       {drop.coverImage ? (
+                          <img src={drop.coverImage} alt={drop.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
+                       ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-black text-4xl">
+                             👾
+                          </div>
+                       )}
+                       
+                       {/* Status Badges */}
+                       <div className="absolute top-3 left-3 flex flex-col gap-2">
+                         {isSoldOut ? (
+                           <span className="bg-red-500/20 text-red-400 border border-red-500/50 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-wider shadow-lg">
+                             Sold Out
+                           </span>
+                         ) : isLive ? (
+                           <span className="bg-green-500/20 text-green-400 border border-green-500/50 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 shadow-lg">
+                             <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span> Minting Now
+                           </span>
+                         ) : (
+                           <span className="bg-gray-800/80 text-gray-300 border border-gray-600 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-wider shadow-lg">
+                             Paused / Upcoming
+                           </span>
+                         )}
+                         
+                         {!isSoldOut && drop.isWlLive && (
+                           <span className="bg-purple-500/20 text-purple-300 border border-purple-500/50 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-wider shadow-lg inline-block w-fit">
+                             WL Active
+                           </span>
+                         )}
+                       </div>
+                    </div>
+
+                    <div className="p-5 flex-1 flex flex-col">
+                       <div className="mb-4">
+                          <h3 className="font-black text-xl text-white group-hover:text-blue-400 transition truncate">{drop.name}</h3>
+                          <p className="text-xs text-gray-500 font-mono mt-1">{drop.symbol} • {drop.address.slice(0,6)}...{drop.address.slice(-4)}</p>
+                       </div>
+                       
+                       <div className="bg-[#0a0a0a] rounded-xl p-3 border border-gray-800/60 mb-5 flex justify-between items-center">
+                          <div>
+                            <p className="text-[9px] uppercase font-bold text-gray-500 mb-0.5">Public Price</p>
+                            <p className="text-sm font-black text-white">{formatEther(drop.publicPrice)} ETH</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[9px] uppercase font-bold text-purple-400/70 mb-0.5">WL Price</p>
+                            <p className="text-sm font-black text-purple-400">{formatEther(drop.wlPrice)} ETH</p>
+                          </div>
+                       </div>
+
+                       <div className="mt-auto">
+                          <div className="flex justify-between items-end mb-2">
+                             <span className="text-[10px] uppercase font-bold text-gray-500">Minted</span>
+                             <span className="text-xs font-black text-white">{drop.totalSupply} <span className="text-gray-500 font-normal">/ {drop.maxSupply}</span></span>
+                          </div>
+                          <div className="w-full bg-gray-900 rounded-full h-2 border border-gray-800 overflow-hidden mb-4">
+                             <div 
+                               className={`h-full rounded-full ${isSoldOut ? 'bg-red-500' : 'bg-gradient-to-r from-blue-500 to-purple-500'}`} 
+                               style={{ width: `${progressPercent}%` }}
+                             ></div>
+                          </div>
+                          
+                          <div className={`w-full py-3 text-center text-sm font-black rounded-xl transition border ${
+                            isSoldOut 
+                              ? 'bg-gray-900 text-gray-600 border-gray-800' 
+                              : isLive
+                                ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-500 group-hover:shadow-[0_0_15px_rgba(59,130,246,0.3)]'
+                                : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border-gray-700'
+                          }`}>
+                            {isSoldOut ? 'View Collection' : isLive ? 'Go to Mint →' : 'View Schedule'}
+                          </div>
+                       </div>
+                    </div>
+                 </Link>
+                 )
+               })}
+             </div>
+          )}
         </div>
-
-        {/* Discovery Grid */}
-        {isLoading ? (
-          <div className="py-20 flex flex-col items-center justify-center text-blue-400 gap-4">
-            <div className="animate-spin rounded-full h-10 w-10 border-4 border-current border-t-transparent" />
-            <p className="font-bold tracking-widest uppercase text-sm">Scanning On-Chain Analytics...</p>
-          </div>
-        ) : filteredCollections.length === 0 ? (
-          <div className="bg-gray-900/40 border border-gray-800 rounded-3xl p-16 text-center">
-            <span className="text-6xl mb-4 block">🌌</span>
-            <h3 className="text-2xl font-bold text-gray-200 mb-2">The Void is Empty</h3>
-            <p className="text-gray-500">No collections matched your search or the network is quiet today.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {filteredCollections.map((col, idx) => (
-              <div key={idx} className="bg-gray-900/80 border border-gray-800 rounded-2xl overflow-hidden hover:border-blue-500/50 transition group flex flex-col shadow-xl">
-                
-                <div className="h-24 bg-gradient-to-r from-gray-800 to-gray-900 relative">
-                  <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]"></div>
-                  {/* Live Status Badge */}
-                  <div className="absolute top-4 right-4 flex items-center gap-2 bg-black/60 backdrop-blur px-3 py-1 rounded-full border border-gray-700">
-                    <span className={`h-2 w-2 rounded-full ${col.isLive ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`}></span>
-                    <span className="text-[10px] font-black uppercase tracking-wider text-gray-200">
-                      {col.isLive ? "Live Now" : "Paused"}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="px-5 pb-6 flex-1 flex flex-col relative">
-                  <div className="w-16 h-16 bg-gray-950 border-4 border-gray-900 rounded-xl absolute -top-8 flex items-center justify-center text-xl font-black text-gray-500 overflow-hidden shadow-lg">
-                    {col.name.charAt(0).toUpperCase()}
-                  </div>
-
-                  <div className="mt-10 mb-4 flex-1">
-                    <h3 className="text-lg font-black text-white truncate">{col.name}</h3>
-                    <div className="flex items-center gap-2 mt-1 mb-4">
-                      <span className="text-[10px] font-bold uppercase tracking-wider bg-gray-800 text-blue-400 px-2 py-0.5 rounded border border-gray-700">
-                        ${col.symbol}
-                      </span>
-                      <span className="text-[10px] text-gray-500 font-mono truncate">
-                        {col.address.slice(0, 6)}...{col.address.slice(-4)}
-                      </span>
-                    </div>
-
-                    {/* Real-Time Mint Progress Bar */}
-                    <div className="bg-gray-950 rounded-lg p-3 border border-gray-800">
-                      <div className="flex justify-between items-end mb-2">
-                        <span className="text-xs font-bold text-gray-400 uppercase">Mint Progress</span>
-                        <span className="text-xs font-mono text-gray-200">{col.minted} / {col.maxSupply || "∞"}</span>
-                      </div>
-                      <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                        <div 
-                          className="h-full bg-gradient-to-r from-blue-500 to-purple-500"
-                          style={{ width: `${col.maxSupply > 0 ? (col.minted / col.maxSupply) * 100 : 0}%` }}
-                        ></div>
-                      </div>
-                      <div className="flex justify-between items-center mt-3 pt-3 border-t border-gray-800/50">
-                        <span className="text-[10px] text-gray-500 uppercase font-bold">Public Price</span>
-                        <span className="text-sm font-black text-blue-400">{col.publicPrice} ETH</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <Link 
-                    href={`/launchpad/${col.address}`}
-                    className="w-full mt-2 block text-center py-3 bg-gray-800 group-hover:bg-blue-600 text-white font-bold rounded-xl transition duration-300"
-                  >
-                    View Collection
-                  </Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
+      </div>
     </BetaGate>
   );
 }

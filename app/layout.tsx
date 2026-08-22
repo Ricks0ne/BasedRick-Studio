@@ -11,6 +11,9 @@ const inter = Inter({ subsets: ["latin"] });
 export const metadata: Metadata = {
   title: "BasedRick | AI NFT Studio",
   description: "Generate and launch NFT collections on Base using AI.",
+  other: {
+    "base:app_id": "6a893d7c39d7d26f4bad174f",
+  },
 };
 
 export default function RootLayout({

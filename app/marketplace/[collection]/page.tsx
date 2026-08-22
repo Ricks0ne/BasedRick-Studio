@@ -19,7 +19,8 @@ interface NFTItem {
 
 export default function CollectionMarketplacePage() {
   const params = useParams();
-  const rawAddress = params?.collection as string | undefined;
+  
+  const rawAddress = (params?.address || params?.collection) as string | undefined;
   const collectionAddress = rawAddress ? (rawAddress.startsWith("0x") ? rawAddress : `0x${rawAddress}`) as `0x${string}` : undefined;
 
   const { address: userAddress, isConnected } = useAccount();
@@ -28,19 +29,31 @@ export default function CollectionMarketplacePage() {
 
   const [items, setItems] = useState<NFTItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // ⚡ NEW: Last Sale Tracking State
+  const [lastSalePrice, setLastSalePrice] = useState<bigint | null>(null);
+  
+  // ⚡ PRO LAYOUT & SWEEPER STATE
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
   const [filterListed, setFilterListed] = useState(false);
+  const [selectedTiers, setSelectedTiers] = useState<string[]>([]);
+  const [sortOption, setSortOption] = useState("price_asc");
+  
+  // 🛒 NEW: Cart State
+  const [cart, setCart] = useState<NFTItem[]>([]);
 
   // Modal States
   const [offerModalToken, setOfferModalToken] = useState<number | null>(null);
   const [offerAmount, setOfferAmount] = useState("");
-  const [offerDuration, setOfferDuration] = useState<number>(86400); // Default 1 Day
+  const [offerDuration, setOfferDuration] = useState<number>(86400); 
   
   const [listModalToken, setListModalToken] = useState<number | null>(null);
   const [listPrice, setListPrice] = useState("");
-  const [listDuration, setListDuration] = useState<number>(604800); // Default 7 Days
+  const [listDuration, setListDuration] = useState<number>(604800); 
 
-  // 1. Fetch Collection Metadata
-  const { data: collectionData, refetch: refetchCollection } = useReadContracts({
+  // Fetch Collection Metadata
+  const { data: collectionData } = useReadContracts({
     contracts: collectionAddress ? [
       { address: collectionAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "name" },
       { address: collectionAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "symbol" },
@@ -52,7 +65,31 @@ export default function CollectionMarketplacePage() {
   const symbol = collectionData?.[1]?.result as string | undefined;
   const totalSupply = collectionData?.[2]?.result as bigint | undefined;
 
-  // 2. Fetch all tokens and their marketplace status via Multicall
+  const resolveIpfs = (url?: string) => {
+    if (!url) return "";
+    return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
+  };
+
+  const fetchWithFallback = async (uri: string) => {
+    if (!uri.startsWith("ipfs://")) {
+      const res = await fetch(uri);
+      return res.json();
+    }
+    const cidPath = uri.replace("ipfs://", "");
+    const gateways = [
+      "https://gateway.pinata.cloud/ipfs/",
+      "https://dweb.link/ipfs/",
+      "https://ipfs.io/ipfs/"
+    ];
+    for (const gateway of gateways) {
+      try {
+        const res = await fetch(`${gateway}${cidPath}`);
+        if (res.ok) return await res.json();
+      } catch (e) {}
+    }
+    throw new Error("All IPFS gateways failed.");
+  };
+
   const loadMarketplaceData = async () => {
     if (!collectionAddress || !publicClient || totalSupply === undefined) return;
     const count = Number(totalSupply);
@@ -61,8 +98,9 @@ export default function CollectionMarketplacePage() {
       setIsLoading(false);
       return;
     }
-
+    
     setIsLoading(true);
+    
     try {
       const calls = [];
       for (let i = 1; i <= count; i++) {
@@ -70,47 +108,88 @@ export default function CollectionMarketplacePage() {
         calls.push({ address: collectionAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "ownerOf", args: [BigInt(i)] });
         calls.push({ address: MARKETPLACE_ADDRESS, abi: MARKETPLACE_ABI, functionName: "listings", args: [collectionAddress, BigInt(i)] });
       }
-
-      const results = await publicClient!.multicall({ contracts: calls });
       
-      const loadedItems: NFTItem[] = [];
-      const resolveIpfs = (url: string) => url.startsWith("ipfs://") ? url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/") : url;
+      const multicallRes = await publicClient.multicall({ contracts: calls });
+      const metadataPromises = [];
       
       for (let i = 0; i < count; i++) {
         const tokenId = i + 1;
-        const uriRes = results[i * 3];
-        const ownerRes = results[i * 3 + 1];
-        const listingRes = results[i * 3 + 2];
-
+        const uriRes = multicallRes[i * 3];
+        const ownerRes = multicallRes[i * 3 + 1];
+        const listingRes = multicallRes[i * 3 + 2];
+        
         const owner = ownerRes.status === "success" ? ownerRes.result as string : "Unknown";
-        // Update parsing for listing struct which now includes expiresAt
         const listing = listingRes.status === "success" ? listingRes.result as [string, bigint, bigint, boolean] : null;
-
+        
         const isListed = listing ? listing[3] : false;
         const price = listing && isListed ? listing[1] : BigInt(0);
-
-        let name = `Token #${tokenId}`;
-        let image = "";
-        let tier = "Unknown";
-
-        if (uriRes.status === "success" && uriRes.result) {
-          try {
-             const metadata = await fetch(resolveIpfs(uriRes.result as string)).then(r => r.json());
-             name = metadata.name || name;
-             image = resolveIpfs(metadata.image);
-             const rarityAttr = metadata.attributes?.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
-             if (rarityAttr) tier = rarityAttr.value;
-          } catch (e) {
-            console.error(`Metadata fetch failed for token ${tokenId}`);
-          }
+        
+        const baseItem = { 
+          tokenId, 
+          owner, 
+          name: `Token #${tokenId}`, 
+          image: "", 
+          tier: "Common", 
+          isListed, 
+          price 
+        };
+        
+        if (uriRes?.status === "success" && uriRes.result) {
+          metadataPromises.push(
+            fetchWithFallback(uriRes.result as string).then(meta => {
+               const rarityAttr = meta.attributes?.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
+               return {
+                 ...baseItem,
+                 name: meta.name || baseItem.name,
+                 image: resolveIpfs(meta.image),
+                 tier: rarityAttr ? String(rarityAttr.value) : "Common"
+               };
+            }).catch(() => baseItem)
+          );
+        } else {
+          metadataPromises.push(Promise.resolve(baseItem));
         }
+      }
+      
+      const resolvedItems = await Promise.all(metadataPromises);
+      setItems(resolvedItems.reverse()); 
 
-        loadedItems.push({ tokenId, owner, name, image, tier, isListed, price });
+      // ⚡ FETCH LAST SALE DATA
+      try {
+        const [purchaseLogs, offerLogs] = await Promise.all([
+          publicClient.getContractEvents({
+            address: MARKETPLACE_ADDRESS,
+            abi: MARKETPLACE_ABI,
+            eventName: "ListingPurchased",
+            args: { nftAddress: collectionAddress },
+            fromBlock: 45796720n, 
+            toBlock: "latest",
+          }),
+          publicClient.getContractEvents({
+            address: MARKETPLACE_ADDRESS,
+            abi: MARKETPLACE_ABI,
+            eventName: "OfferAccepted",
+            args: { nftAddress: collectionAddress },
+            fromBlock: 45796720n,
+            toBlock: "latest",
+          })
+        ]);
+
+        const allSales = [...purchaseLogs, ...offerLogs].sort((a, b) => 
+          Number(b.blockNumber) - Number(a.blockNumber)
+        );
+
+        if (allSales.length > 0) {
+          const newestSale = allSales[0];
+          setLastSalePrice(newestSale.args.price as bigint);
+        } else {
+          setLastSalePrice(null); 
+        }
+      } catch (logError) {
+        console.error("Failed to fetch sale history:", logError);
       }
 
-      setItems(loadedItems.reverse()); 
     } catch (err) {
-      console.error("Failed to load marketplace items", err);
       toast.error("Failed to load marketplace data");
     } finally {
       setIsLoading(false);
@@ -121,304 +200,420 @@ export default function CollectionMarketplacePage() {
     loadMarketplaceData();
   }, [collectionAddress, totalSupply, publicClient]);
 
+  // --- Filtering & Sorting Logic ---
   const activeListings = items.filter(i => i.isListed);
-  let floorPrice = BigInt(0);
-  if (activeListings.length > 0) {
-    floorPrice = activeListings.reduce((min, p) => p.price < min ? p.price : min, activeListings[0].price);
+  const floorPrice = activeListings.length > 0 ? activeListings.reduce((min, p) => p.price < min ? p.price : min, activeListings[0].price) : BigInt(0);
+  const listedPercentage = totalSupply && Number(totalSupply) > 0 ? ((activeListings.length / Number(totalSupply)) * 100).toFixed(1) : "0";
+
+  let displayItems = items;
+
+  if (filterListed) displayItems = displayItems.filter(i => i.isListed);
+  if (selectedTiers.length > 0) displayItems = displayItems.filter(i => selectedTiers.includes(i.tier));
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    displayItems = displayItems.filter(i => i.name.toLowerCase().includes(q) || i.tokenId.toString().includes(q));
   }
 
-  const displayItems = filterListed ? activeListings : items;
+  displayItems = [...displayItems].sort((a, b) => {
+    if (sortOption === "price_asc") {
+      if (!a.isListed && b.isListed) return 1;
+      if (a.isListed && !b.isListed) return -1;
+      return Number(a.price) - Number(b.price);
+    }
+    if (sortOption === "price_desc") {
+      if (!a.isListed && b.isListed) return 1;
+      if (a.isListed && !b.isListed) return -1;
+      return Number(b.price) - Number(a.price);
+    }
+    if (sortOption === "id_asc") return a.tokenId - b.tokenId;
+    if (sortOption === "id_desc") return b.tokenId - a.tokenId;
+    return 0;
+  });
+
+  const toggleTier = (tier: string) => {
+    setSelectedTiers(prev => prev.includes(tier) ? prev.filter(t => t !== tier) : [...prev, tier]);
+  };
+
+  // 🛒 NEW: Cart Toggles
+  const toggleCartItem = (item: NFTItem) => {
+    if (cart.find(i => i.tokenId === item.tokenId)) {
+      setCart(cart.filter(i => i.tokenId !== item.tokenId));
+    } else {
+      setCart([...cart, item]);
+    }
+  };
+
+  const cartTotal = cart.reduce((total, item) => total + item.price, BigInt(0));
 
   // --- Contract Interactions ---
-
   const handleBuy = async (tokenId: number, price: bigint) => {
     if (!isConnected) return toast.error("Connect wallet to buy");
     try {
       const hash = await writeContractAsync({
-        address: MARKETPLACE_ADDRESS,
-        abi: MARKETPLACE_ABI,
-        functionName: "buyListing",
-        args: [collectionAddress, BigInt(tokenId)],
-        value: price,
+        address: MARKETPLACE_ADDRESS, abi: MARKETPLACE_ABI, functionName: "buyListing",
+        args: [collectionAddress, BigInt(tokenId)], value: price,
       });
-      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
-        loading: 'Processing purchase...',
-        success: '🎉 NFT Purchased successfully!',
-        error: 'Purchase failed',
-      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), { loading: 'Processing purchase...', success: '🎉 NFT Purchased successfully!', error: 'Purchase failed' });
+      
+      // Remove from cart if it was there
+      setCart(prev => prev.filter(i => i.tokenId !== tokenId));
       loadMarketplaceData();
+    } catch (err: any) { toast.error(err.shortMessage || "Transaction rejected"); }
+  };
+
+  // 🛒 UPGRADED: True One-Click Sweep Execution
+  const handleSweep = async () => {
+    if (!isConnected) return toast.error("Connect wallet to buy");
+    if (cart.length === 0) return;
+
+    // Calculate total ETH needed and extract the array of token IDs
+    const totalCost = cart.reduce((total, item) => total + item.price, BigInt(0));
+    const tokenIdsToSweep = cart.map(item => BigInt(item.tokenId));
+
+    try {
+      // ONE single signature for the entire cart
+      const hash = await writeContractAsync({
+        address: MARKETPLACE_ADDRESS, 
+        abi: MARKETPLACE_ABI, 
+        functionName: "buyBatch",
+        args: [collectionAddress, tokenIdsToSweep], 
+        value: totalCost,
+      });
+
+      const sweepToast = toast.loading(`Sweeping ${cart.length} NFTs in one transaction...`);
+      
+      await publicClient!.waitForTransactionReceipt({ hash });
+      
+      toast.dismiss(sweepToast);
+      toast.success(`🎉 Floor Swept! You bought ${cart.length} items.`);
+      
+      setCart([]); // Empty the cart
+      loadMarketplaceData(); // Refresh the grid
     } catch (err: any) {
-      toast.error(err.shortMessage || "Transaction rejected");
+      console.error("Sweep failed:", err);
+      toast.error(err?.shortMessage || "Transaction rejected.");
     }
   };
 
   const submitOffer = async () => {
     if (!offerModalToken || !offerAmount) return;
     try {
-      const value = parseEther(offerAmount);
       const hash = await writeContractAsync({
-        address: MARKETPLACE_ADDRESS,
-        abi: MARKETPLACE_ABI,
-        functionName: "makeOffer",
-        // ⚡ Updated to include the duration in seconds
-        args: [collectionAddress, BigInt(offerModalToken), BigInt(offerDuration)],
-        value: value,
+        address: MARKETPLACE_ADDRESS, abi: MARKETPLACE_ABI, functionName: "makeOffer",
+        args: [collectionAddress, BigInt(offerModalToken), BigInt(offerDuration)], value: parseEther(offerAmount),
       });
-      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
-        loading: 'Locking offer in escrow...',
-        success: '✅ Offer placed successfully!',
-        error: 'Offer failed',
-      });
-      setOfferModalToken(null);
-      setOfferAmount("");
-    } catch (err: any) {
-      toast.error(err.shortMessage || "Transaction rejected");
-    }
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), { loading: 'Locking offer...', success: '✅ Offer placed successfully!', error: 'Offer failed' });
+      setOfferModalToken(null); setOfferAmount("");
+    } catch (err: any) { toast.error(err.shortMessage || "Transaction rejected"); }
   };
 
   const submitListing = async () => {
     if (!listModalToken || !listPrice || !collectionAddress) return;
     try {
       const approvalHash = await writeContractAsync({
-        address: collectionAddress,
-        abi: BASEDRICK_LAUNCHPAD_ABI,
-        functionName: "approve",
-        args: [MARKETPLACE_ADDRESS, BigInt(listModalToken)],
+        address: collectionAddress, abi: BASEDRICK_LAUNCHPAD_ABI, functionName: "approve", args: [MARKETPLACE_ADDRESS, BigInt(listModalToken)],
       });
-      
-      await toast.promise(publicClient!.waitForTransactionReceipt({ hash: approvalHash }), {
-        loading: 'Approving marketplace...',
-        success: '✅ Approved! Confirm listing...',
-        error: 'Approval failed',
-      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash: approvalHash }), { loading: 'Approving...', success: '✅ Approved!', error: 'Approval failed' });
 
-      const priceWei = parseEther(listPrice);
       const hash = await writeContractAsync({
-        address: MARKETPLACE_ADDRESS,
-        abi: MARKETPLACE_ABI,
-        functionName: "createListing",
-        // ⚡ Updated to include the duration in seconds
-        args: [collectionAddress, BigInt(listModalToken), priceWei, BigInt(listDuration)],
+        address: MARKETPLACE_ADDRESS, abi: MARKETPLACE_ABI, functionName: "createListing",
+        args: [collectionAddress, BigInt(listModalToken), parseEther(listPrice), BigInt(listDuration)],
       });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), { loading: 'Listing NFT...', success: '🚀 Listed for sale!', error: 'Listing failed' });
 
-      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
-        loading: 'Listing NFT...',
-        success: '🚀 Successfully listed for sale!',
-        error: 'Listing failed',
-      });
-
-      setListModalToken(null);
-      setListPrice("");
-      loadMarketplaceData();
-    } catch (err: any) {
-      toast.error(err.shortMessage || "Transaction rejected");
-    }
+      setListModalToken(null); setListPrice(""); loadMarketplaceData();
+    } catch (err: any) { toast.error(err.shortMessage || "Transaction rejected"); }
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-12 text-white">
-      {/* Collection Header */}
-      <div className="bg-gray-900/80 border border-gray-800 rounded-3xl p-8 mb-8 backdrop-blur shadow-2xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600/10 blur-3xl rounded-full translate-x-1/2 -translate-y-1/2"></div>
-        <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
-          <div>
-            <h1 className="text-4xl md:text-5xl font-black text-white">
-              {collectionName || "Loading Collection..."}
-            </h1>
-            <p className="text-gray-400 font-mono mt-2 flex items-center gap-2">
-               Symbol: <span className="text-gray-200">{symbol}</span> | 
-               Contract: <a href={`https://sepolia.basescan.org/address/${collectionAddress}`} target="_blank" className="text-blue-400 hover:underline">{collectionAddress?.slice(0,6)}...{collectionAddress?.slice(-4)} ↗</a>
-            </p>
+    <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
+      
+      {/* COMMAND CENTER HEADER */}
+      <div className="sticky top-0 z-40 bg-[#0a0a0a]/90 backdrop-blur-xl border-b border-gray-800 px-6 py-6 shadow-2xl">
+        <div className="max-w-[1600px] mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div className="flex items-center gap-4">
+             <div className="w-16 h-16 bg-gray-900 border border-gray-800 rounded-xl flex items-center justify-center text-2xl shadow-inner">
+               👾
+             </div>
+             <div>
+                <h1 className="text-2xl md:text-3xl font-black text-white flex items-center gap-2">
+                  {collectionName || "Loading..."} <span className="text-blue-500 text-lg">☑</span>
+                </h1>
+                <div className="flex items-center gap-3 text-xs font-mono text-gray-500 mt-1">
+                   <span>{symbol}</span>
+                   <span>•</span>
+                   <a href={`https://sepolia.basescan.org/address/${collectionAddress}`} target="_blank" className="hover:text-blue-400 transition">{collectionAddress?.slice(0,6)}...{collectionAddress?.slice(-4)} ↗</a>
+                </div>
+             </div>
           </div>
-          
-          <div className="flex gap-6 md:gap-12 bg-gray-950/50 p-4 rounded-2xl border border-gray-800">
-             <div>
-                <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest mb-1">Floor Price</p>
-                <p className="text-2xl font-black text-blue-400">
-                    {floorPrice > BigInt(0) ? formatEther(floorPrice) : "---"} <span className="text-sm font-bold text-gray-500">ETH</span>
-                </p>
+
+          <div className="flex flex-wrap gap-6 md:gap-10">
+             
+             {/* ⚡ NEW: Last Sale Metric */}
+             <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-gray-500 font-bold tracking-widest">Last Sale</span>
+                <span className="text-xl font-black text-white">
+                  {lastSalePrice !== null ? formatEther(lastSalePrice) : "--"} <span className="text-sm text-gray-400">ETH</span>
+                </span>
              </div>
-             <div>
-                <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest mb-1">Total Items</p>
-                <p className="text-2xl font-black text-white">{totalSupply !== undefined ? Number(totalSupply) : "---"}</p>
+
+             <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-gray-500 font-bold tracking-widest">Floor Price</span>
+                <span className="text-xl font-black text-white">{floorPrice > BigInt(0) ? formatEther(floorPrice) : "--"} <span className="text-sm text-gray-400">ETH</span></span>
              </div>
-             <div>
-                <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest mb-1">Listed</p>
-                <p className="text-2xl font-black text-purple-400">{activeListings.length}</p>
+             <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-gray-500 font-bold tracking-widest">Listed</span>
+                <span className="text-xl font-black text-white">{activeListings.length} <span className="text-sm text-gray-400">({listedPercentage}%)</span></span>
+             </div>
+             <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-gray-500 font-bold tracking-widest">Total Items</span>
+                <span className="text-xl font-black text-white">{totalSupply !== undefined ? Number(totalSupply) : "--"}</span>
              </div>
           </div>
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
-        <div className="flex gap-2 bg-gray-900 p-1 rounded-lg border border-gray-800">
-            <button 
-                onClick={() => setFilterListed(false)}
-                className={`px-4 py-2 rounded-md text-sm font-bold transition ${!filterListed ? "bg-gray-700 text-white shadow" : "text-gray-400 hover:text-white"}`}
-            >
-                All Items
-            </button>
-            <button 
-                onClick={() => setFilterListed(true)}
-                className={`px-4 py-2 rounded-md text-sm font-bold transition flex items-center gap-2 ${filterListed ? "bg-gray-700 text-white shadow" : "text-gray-400 hover:text-white"}`}
-            >
-                <span>Listed</span>
-                <span className="bg-gray-950 px-1.5 py-0.5 rounded text-[10px]">{activeListings.length}</span>
-            </button>
-        </div>
-      </div>
+      {/* MAIN WORKSPACE */}
+      <div className="max-w-[1600px] mx-auto px-4 py-8 flex flex-col md:flex-row gap-6">
+        
+        {/* COLLAPSIBLE SIDEBAR */}
+        <div className={`transition-all duration-300 ${isSidebarOpen ? 'w-full md:w-72' : 'w-0 hidden md:block overflow-hidden'}`}>
+          <div className="bg-[#0f0f0f] border border-gray-800 rounded-2xl p-5 sticky top-36">
+             <div className="mb-6">
+                <h3 className="text-sm font-black uppercase text-gray-400 tracking-wider mb-3">Search</h3>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-gray-500">🔍</span>
+                  <input 
+                    type="text" 
+                    placeholder="Token ID or Name" 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-9 pr-4 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none transition"
+                  />
+                </div>
+             </div>
 
-      {/* Grid */}
-      {isLoading ? (
-         <div className="py-24 flex flex-col justify-center items-center gap-4">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-            <p className="text-gray-500 font-mono text-sm uppercase tracking-widest animate-pulse">Syncing Blockchain Data...</p>
-         </div>
-      ) : displayItems.length === 0 ? (
-        <div className="text-center py-24 bg-gray-900/40 rounded-3xl border border-gray-800/50">
-          <span className="text-4xl mb-4 block">👻</span>
-          <p className="text-xl text-gray-400 font-semibold">No items found.</p>
+             <div className="mb-6 border-t border-gray-800 pt-6">
+                <h3 className="text-sm font-black uppercase text-gray-400 tracking-wider mb-3">Status</h3>
+                <button 
+                  onClick={() => setFilterListed(!filterListed)}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-lg border transition ${filterListed ? 'bg-blue-600/10 border-blue-500/50 text-blue-400' : 'bg-gray-900 border-gray-800 text-gray-300 hover:border-gray-700'}`}
+                >
+                  <span className="font-bold text-sm">Buy Now</span>
+                  <span className="text-xs bg-black/40 px-2 py-0.5 rounded border border-gray-700">{activeListings.length}</span>
+                </button>
+             </div>
+
+             <div className="border-t border-gray-800 pt-6">
+                <h3 className="text-sm font-black uppercase text-gray-400 tracking-wider mb-3">Traits & Rarity</h3>
+                <div className="flex flex-col gap-2">
+                   {["Mythic", "Legendary", "Epic", "Rare", "Uncommon", "Common"].map((tier) => (
+                     <label key={tier} className="flex items-center gap-3 cursor-pointer group">
+                        <div className={`w-5 h-5 rounded border flex items-center justify-center transition ${selectedTiers.includes(tier) ? 'bg-blue-600 border-blue-500' : 'bg-gray-900 border-gray-700 group-hover:border-gray-500'}`}>
+                           {selectedTiers.includes(tier) && <span className="text-xs">✓</span>}
+                        </div>
+                        <input type="checkbox" className="hidden" checked={selectedTiers.includes(tier)} onChange={() => toggleTier(tier)} />
+                        <span className="text-sm font-semibold text-gray-300 group-hover:text-white transition">{tier}</span>
+                     </label>
+                   ))}
+                </div>
+             </div>
+          </div>
         </div>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-          {displayItems.map((item) => {
-            const isOwner = userAddress?.toLowerCase() === item.owner.toLowerCase();
-            
-            return (
-            <div key={item.tokenId} className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden hover:border-gray-600 transition group flex flex-col">
-              <div className="aspect-square bg-gray-950 relative">
-                 {item.image ? (
-                     <img src={item.image} alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
-                 ) : (
-                     <div className="w-full h-full flex items-center justify-center text-gray-700 text-xs">No Image</div>
-                 )}
-                 <span className="absolute top-2 left-2 bg-black/60 backdrop-blur px-2 py-0.5 rounded text-[10px] font-black border border-gray-700 shadow-lg">
-                    #{item.tokenId}
-                 </span>
-                 <span className="absolute top-2 right-2 bg-gray-900/80 backdrop-blur px-2 py-0.5 rounded-full text-[9px] font-black uppercase border border-gray-700 text-gray-300">
-                    {item.tier}
-                 </span>
+
+        {/* GRID AREA */}
+        <div className="flex-1">
+           {/* Toolbar */}
+           <div className="flex items-center justify-between mb-6">
+              <button 
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                className="p-2 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-lg text-gray-400 transition hidden md:block"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+              </button>
+              
+              <div className="flex items-center gap-4 w-full md:w-auto">
+                 <span className="text-sm text-gray-500 font-bold hidden sm:block">{displayItems.length} Results</span>
+                 <select 
+                    value={sortOption}
+                    onChange={(e) => setSortOption(e.target.value)}
+                    className="w-full md:w-auto bg-gray-900 border border-gray-800 text-sm font-bold text-white px-4 py-2.5 rounded-lg focus:outline-none focus:border-blue-500 cursor-pointer"
+                 >
+                    <option value="price_asc">Price: Low to High</option>
+                    <option value="price_desc">Price: High to Low</option>
+                    <option value="id_asc">Token ID: Low to High</option>
+                    <option value="id_desc">Token ID: High to Low</option>
+                 </select>
               </div>
+           </div>
 
-              <div className="p-3 flex-1 flex flex-col">
-                <h3 className="font-bold text-sm text-gray-200 truncate">{item.name}</h3>
-                
-                <div className="mt-auto pt-3 flex items-end justify-between">
-                    <div>
-                        {item.isListed ? (
-                            <>
-                                <p className="text-[9px] uppercase text-gray-500 font-bold">Price</p>
-                                <p className="text-sm font-black text-white">{formatEther(item.price)} ETH</p>
-                            </>
+           {/* Grid */}
+           {isLoading ? (
+             <div className="py-32 flex flex-col items-center gap-4">
+                <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-xs text-gray-500 font-bold tracking-widest uppercase">Fetching Market Data...</p>
+             </div>
+           ) : displayItems.length === 0 ? (
+             <div className="py-32 text-center bg-gray-900/20 border border-gray-800/50 rounded-2xl">
+                <span className="text-4xl block mb-3 opacity-50">📭</span>
+                <p className="text-lg font-bold text-gray-400">No items match your filters.</p>
+             </div>
+           ) : (
+             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+               {displayItems.map((item) => {
+                 const isOwner = userAddress?.toLowerCase() === item.owner.toLowerCase();
+                 const inCart = cart.some(c => c.tokenId === item.tokenId);
+
+                 return (
+                   <div key={item.tokenId} className={`bg-[#121212] rounded-xl overflow-hidden hover:border-gray-500 transition group flex flex-col relative border ${inCart ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-gray-800'}`}>
+                      
+                      {/* Top Trait Badges */}
+                      <div className="absolute top-2 left-2 right-2 flex justify-between z-10 opacity-90">
+                         <span className="bg-black/70 backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-black border border-gray-700">#{item.tokenId}</span>
+                         <span className="bg-gray-900/80 backdrop-blur-md px-2 py-0.5 rounded text-[9px] font-black uppercase border border-gray-700">{item.tier}</span>
+                      </div>
+
+                      <div className="aspect-square bg-black relative overflow-hidden">
+                        {item.image ? (
+                           <img src={item.image} alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition duration-500" />
                         ) : (
-                            <p className="text-[10px] text-gray-500 italic">Not Listed</p>
+                           <div className="w-full h-full flex items-center justify-center text-gray-800 text-xs">No Image</div>
                         )}
-                    </div>
-                </div>
+                        
+                        {/* ⚡ PRO FEATURE: Cart Toggles & CTAs */}
+                        <div className={`absolute inset-0 bg-black/40 flex flex-col items-center justify-center gap-2 transition duration-200 ${inCart ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                           {item.isListed ? (
+                               isOwner ? (
+                                  <span className="px-4 py-2 bg-gray-800/90 backdrop-blur text-white text-xs font-bold rounded-lg border border-gray-600">Your Listing</span>
+                               ) : (
+                                  <>
+                                    <button onClick={() => toggleCartItem(item)} className={`px-6 py-2.5 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition border ${inCart ? 'bg-red-600 hover:bg-red-500 border-red-500' : 'bg-gray-800 hover:bg-gray-700 border-gray-600'}`}>
+                                      {inCart ? "Remove" : "Add to Cart"}
+                                    </button>
+                                    {!inCart && (
+                                      <button onClick={() => handleBuy(item.tokenId, item.price)} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition">
+                                        Buy Now
+                                      </button>
+                                    )}
+                                  </>
+                               )
+                           ) : (
+                               isOwner ? (
+                                  <button onClick={() => setListModalToken(item.tokenId)} className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition">
+                                     List Item
+                                  </button>
+                               ) : (
+                                  <button onClick={() => setOfferModalToken(item.tokenId)} className="px-6 py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-black rounded-lg shadow-xl border border-gray-600 translate-y-4 group-hover:translate-y-0 transition">
+                                     Make Offer
+                                  </button>
+                               )
+                           )}
+                        </div>
+                      </div>
 
-                <div className="mt-3 pt-3 border-t border-gray-800">
-                    {item.isListed ? (
-                        isOwner ? (
-                             <button disabled className="w-full py-2 bg-gray-800 text-gray-500 text-xs font-bold rounded cursor-not-allowed">You Listed This</button>
-                        ) : (
-                             <button onClick={() => handleBuy(item.tokenId, item.price)} className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded transition">
-                                Buy Now
-                             </button>
-                        )
-                    ) : (
-                        isOwner ? (
-                            <button onClick={() => setListModalToken(item.tokenId)} className="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded transition">
-                                List for Sale
-                            </button>
-                        ) : (
-                            <button onClick={() => setOfferModalToken(item.tokenId)} className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-500 text-gray-300 text-xs font-bold rounded transition">
-                                Make Offer
-                            </button>
-                        )
-                    )}
-                </div>
+                      <div className="p-3 flex-1 flex flex-col justify-between">
+                         <div>
+                            <h3 className="font-bold text-xs text-gray-300 truncate">{item.name}</h3>
+                            <p className="text-[10px] text-gray-600 font-mono mt-0.5 truncate">Owner: {item.owner.slice(0,6)}...{item.owner.slice(-4)}</p>
+                         </div>
+                         <div className="mt-3 pt-3 border-t border-gray-800/50">
+                            {item.isListed ? (
+                               <div className="flex items-end justify-between">
+                                  <span className="text-[10px] text-gray-500 uppercase font-bold">Price</span>
+                                  <span className="text-sm font-black text-white">{formatEther(item.price)} ETH</span>
+                               </div>
+                            ) : (
+                               <div className="flex items-center">
+                                  <span className="text-[10px] text-gray-600 italic font-semibold">Not Listed</span>
+                               </div>
+                            )}
+                         </div>
+                      </div>
+                   </div>
+                 )
+               })}
+             </div>
+           )}
+        </div>
+      </div>
+
+      {/* 🛒 FLOATING SWEEPER CART */}
+      {cart.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-10 fade-in duration-300 w-11/12 max-w-lg">
+          <div className="bg-[#1a1a1a] border border-gray-700 rounded-2xl shadow-2xl p-4 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="bg-blue-600/20 text-blue-400 w-10 h-10 rounded-xl flex items-center justify-center font-black border border-blue-500/30">
+                {cart.length}
+              </div>
+              <div>
+                <p className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Cart Total</p>
+                <p className="text-lg font-black text-white">{formatEther(cartTotal)} ETH</p>
               </div>
             </div>
-            )
-          })}
+            <div className="flex items-center gap-3">
+              <button 
+                onClick={() => setCart([])}
+                className="text-gray-400 hover:text-white text-xs font-bold px-3 transition"
+              >
+                Clear
+              </button>
+              <button 
+                onClick={handleSweep}
+                className="bg-blue-600 hover:bg-blue-500 text-white font-black text-sm px-6 py-3 rounded-xl shadow-lg shadow-blue-900/50 transition"
+              >
+                Sweep ({cart.length})
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Offer Modal */}
+      {/* --- MODALS (Offer & List) --- */}
       {offerModalToken !== null && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-gray-900 border border-gray-700 p-6 rounded-2xl w-full max-w-sm">
+            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl">
                 <h3 className="text-xl font-bold mb-1 text-white">Make an Offer</h3>
                 <p className="text-xs text-gray-400 mb-6">Place an ETH bid on Token #{offerModalToken}. Escrowed securely.</p>
-                
-                <input 
-                    type="text" 
-                    placeholder="Amount in ETH (e.g. 0.05)" 
-                    value={offerAmount}
-                    onChange={(e) => setOfferAmount(e.target.value)}
-                    className="w-full bg-gray-950 border border-gray-700 p-3 rounded-lg text-white font-mono mb-4 focus:border-blue-500 focus:outline-none"
-                />
-
+                <input type="text" placeholder="Amount in ETH (e.g. 0.05)" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-mono mb-4 focus:border-blue-500 focus:outline-none" />
                 <div className="mb-6">
                     <label className="block text-[10px] text-gray-500 uppercase font-bold mb-1">Expiration</label>
-                    <select 
-                        value={offerDuration} 
-                        onChange={(e) => setOfferDuration(Number(e.target.value))}
-                        className="w-full bg-gray-950 border border-gray-700 p-3 rounded-lg text-white font-bold focus:border-blue-500 focus:outline-none"
-                    >
+                    <select value={offerDuration} onChange={(e) => setOfferDuration(Number(e.target.value))} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-bold focus:border-blue-500 focus:outline-none">
                         <option value={86400}>1 Day</option>
                         <option value={259200}>3 Days</option>
                         <option value={604800}>7 Days</option>
                         <option value={2592000}>30 Days</option>
                     </select>
                 </div>
-                
                 <div className="flex gap-3">
-                    <button onClick={() => setOfferModalToken(null)} className="flex-1 py-3 bg-gray-800 text-white rounded-lg font-bold text-sm hover:bg-gray-700">Cancel</button>
+                    <button onClick={() => setOfferModalToken(null)} className="flex-1 py-3 bg-gray-900 text-white rounded-lg font-bold text-sm hover:bg-gray-800 border border-gray-800">Cancel</button>
                     <button onClick={submitOffer} className="flex-1 py-3 bg-blue-600 text-white rounded-lg font-bold text-sm hover:bg-blue-500">Lock Offer</button>
                 </div>
             </div>
         </div>
       )}
 
-      {/* List Modal */}
       {listModalToken !== null && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-gray-900 border border-gray-700 p-6 rounded-2xl w-full max-w-sm">
+            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl">
                 <h3 className="text-xl font-bold mb-1 text-white">List for Sale</h3>
-                <p className="text-xs text-gray-400 mb-6">Set a price for Token #{listModalToken}. Includes 2% platform fee & royalties.</p>
-                
-                <input 
-                    type="text" 
-                    placeholder="Price in ETH (e.g. 0.1)" 
-                    value={listPrice}
-                    onChange={(e) => setListPrice(e.target.value)}
-                    className="w-full bg-gray-950 border border-gray-700 p-3 rounded-lg text-white font-mono mb-4 focus:border-purple-500 focus:outline-none"
-                />
-
+                <p className="text-xs text-gray-400 mb-6">Set a price for Token #{listModalToken}. Includes protocol fees.</p>
+                <input type="text" placeholder="Price in ETH (e.g. 0.1)" value={listPrice} onChange={(e) => setListPrice(e.target.value)} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-mono mb-4 focus:border-purple-500 focus:outline-none" />
                 <div className="mb-6">
                     <label className="block text-[10px] text-gray-500 uppercase font-bold mb-1">Duration</label>
-                    <select 
-                        value={listDuration} 
-                        onChange={(e) => setListDuration(Number(e.target.value))}
-                        className="w-full bg-gray-950 border border-gray-700 p-3 rounded-lg text-white font-bold focus:border-purple-500 focus:outline-none"
-                    >
+                    <select value={listDuration} onChange={(e) => setListDuration(Number(e.target.value))} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-bold focus:border-purple-500 focus:outline-none">
                         <option value={86400}>1 Day</option>
                         <option value={259200}>3 Days</option>
                         <option value={604800}>7 Days</option>
                         <option value={2592000}>30 Days</option>
                     </select>
                 </div>
-                
                 <div className="flex gap-3">
-                    <button onClick={() => setListModalToken(null)} className="flex-1 py-3 bg-gray-800 text-white rounded-lg font-bold text-sm hover:bg-gray-700">Cancel</button>
+                    <button onClick={() => setListModalToken(null)} className="flex-1 py-3 bg-gray-900 text-white rounded-lg font-bold text-sm hover:bg-gray-800 border border-gray-800">Cancel</button>
                     <button onClick={submitListing} className="flex-1 py-3 bg-purple-600 text-white rounded-lg font-bold text-sm hover:bg-purple-500">List Item</button>
                 </div>
             </div>
         </div>
       )}
-
     </div>
   );
 }

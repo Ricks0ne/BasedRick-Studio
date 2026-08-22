@@ -8,8 +8,7 @@ import toast from "react-hot-toast";
 import { LAUNCHPAD_FACTORY_ABI } from "@/abi";
 import BetaGate from "@/components/BetaGate";
 
-// Using your existing factory address
-const FACTORY_ADDRESS = "0x66E16D8B540Ad20834b6f0a8115C8C039353F5bE" as `0x${string}`;
+const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 
 interface GeneratedNFT {
   tokenId: number;
@@ -24,7 +23,6 @@ export default function LaunchpadCreatePage() {
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
 
-  // ⚡ NEW: Mode Toggle State
   const [activeMode, setActiveMode] = useState<"ai" | "custom">("ai");
 
   // --- Shared Form State ---
@@ -48,25 +46,28 @@ export default function LaunchpadCreatePage() {
   const aiTotalSupply = Object.values(rarityTiers).reduce((sum, val) => sum + (val || 0), 0);
   
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
   const [previewItems, setPreviewItems] = useState<GeneratedNFT[]>([]);
   const [aiBaseUri, setAiBaseUri] = useState<string | null>(null);
 
   // --- Custom Art Specific State ---
-  const [customSupply, setCustomSupply] = useState<number>(100);
+  const [customSupply, setCustomSupply] = useState<number>(10);
   const [customBaseUri, setCustomBaseUri] = useState<string>("");
 
   // Pipeline & UI State
+  const [isDeploying, setIsDeploying] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [deployedAddress, setDeployedAddress] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
 
-  // Determine active supply based on current mode
   const activeTotalSupply = activeMode === "ai" ? aiTotalSupply : customSupply;
 
   const handleGeneratePreview = async () => {
     if (!name || !basePrompt || aiTotalSupply === 0) {
       toast.error("Please fill in Name, Prompt, and ensure Supply > 0");
+      return;
+    }
+    if (aiTotalSupply > 10) {
+      toast.error("Beta Limit: You can generate a maximum of 10 NFTs per collection.");
       return;
     }
 
@@ -98,50 +99,33 @@ export default function LaunchpadCreatePage() {
     ).finally(() => setIsGenerating(false));
   };
 
-  const handleUploadToIPFS = async () => {
-    if (previewItems.length === 0) {
-      toast.error("Please generate a preview first!");
-      return;
-    }
+  // ⚡ THE MASTER ONE-CLICK DEPLOY PIPELINE FOR AI
+  const handleOneClickDeploy = async () => {
+    if (!isConnected || !address) return toast.error("Please connect your wallet first!");
+    if (!publicClient) return toast.error("Network RPC client not ready.");
+    if (activeTotalSupply <= 0 || activeTotalSupply > 10) return toast.error("Invalid supply.");
+    if (previewItems.length === 0) return toast.error("Generate a preview first!");
 
-    setIsUploading(true);
-    setStatusMessage("Packaging metadata folder & pinning to IPFS...");
+    setIsDeploying(true);
+    setDeployedAddress(null);
+    setTxHash(null);
 
-    toast.promise(
-      fetch("/api/upload-metadata", {
+    try {
+      // 1. PIN TO IPFS IN THE BACKGROUND
+      setStatusMessage("Step 1/2: Pinning metadata to IPFS...");
+      const ipfsRes = await fetch("/api/upload-metadata", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: previewItems }),
-      }).then(async (res) => {
-        const data = await res.json();
-        if (!data.success) throw new Error(data.error);
-        return data;
-      }),
-      {
-        loading: 'Pinning to IPFS via Pinata...',
-        success: (data) => {
-          setAiBaseUri(data.baseUri);
-          setStatusMessage(`✅ Pinned to IPFS! Base URI ready for on-chain deployment.`);
-          return 'Assets securely pinned to IPFS!';
-        },
-        error: (err) => {
-          setStatusMessage(null);
-          return `Upload failed: ${err.message}`;
-        }
-      }
-    ).finally(() => setIsUploading(false));
-  };
+      });
+      const ipfsData = await ipfsRes.json();
+      if (!ipfsData.success) throw new Error(ipfsData.error || "IPFS Upload Failed");
+      
+      const generatedBaseUri = ipfsData.baseUri;
+      setAiBaseUri(generatedBaseUri);
 
-  const handleDeployCollection = async () => {
-    if (!isConnected || !address) return toast.error("Please connect your wallet first!");
-    if (!publicClient) return toast.error("Network RPC client not ready.");
-    if (activeTotalSupply <= 0) return toast.error("Total supply must be greater than 0");
-
-    setDeployedAddress(null);
-    setTxHash(null);
-    setStatusMessage("Submitting transaction to wallet...");
-    
-    try {
+      // 2. LAUNCH CONTRACT WITH URI PRE-LOADED
+      setStatusMessage("Step 2/2: Deploying Contract (Please sign in wallet)...");
       const royaltyBps = BigInt(Math.round(royaltyPercentage * 100));
 
       const hash = await writeContractAsync({
@@ -154,55 +138,109 @@ export default function LaunchpadCreatePage() {
           BigInt(activeTotalSupply),
           parseEther(whitelistPrice || "0"),
           parseEther(publicPrice || "0"),
-          BigInt(maxWlMint),   
+          BigInt(maxWlMint),
           BigInt(maxPubMint),
           BigInt(maxCreatorAllocation),
-          royaltyBps
+          royaltyBps,
+          generatedBaseUri // ⚡ NEW: Passed directly to the contract!
         ],
       });
 
       setTxHash(hash);
-      setStatusMessage("Transaction submitted! Waiting for block confirmation on Base...");
+      setStatusMessage("Waiting for Base block confirmation...");
 
-      toast.promise(
-        publicClient.waitForTransactionReceipt({ hash }),
-        {
-          loading: 'Confirming transaction on Base...',
-          success: (receipt) => {
-            let newAddress: string | null = null;
-            for (const log of receipt.logs) {
-              try {
-                const decoded = decodeEventLog({
-                  abi: LAUNCHPAD_FACTORY_ABI,
-                  data: log.data,
-                  topics: log.topics,
-                });
-                if (decoded.eventName === "CollectionLaunched") {
-                  newAddress = (decoded.args as any).collectionAddress;
-                  break;
-                }
-              } catch (e) {}
-            }
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
-            if (newAddress && newAddress !== "0x0000000000000000000000000000000000000000") {
-              setDeployedAddress(newAddress);
-            } else {
-              setDeployedAddress("Deployed (Check BaseScan)");
-            }
-
-            setStatusMessage(null);
-            return 'Collection successfully deployed!';
-          },
-          error: () => {
-            setStatusMessage(null);
-            return 'Transaction reverted.';
+      let newAddress: string | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: LAUNCHPAD_FACTORY_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+          if (decoded.eventName === "CollectionLaunched") {
+            newAddress = (decoded.args as any).collectionAddress;
+            break;
           }
-        }
-      );
+        } catch (e) {}
+      }
+
+      setDeployedAddress(newAddress && newAddress !== "0x0000000000000000000000000000000000000000" ? newAddress : "Deployed (Check BaseScan)");
+      setStatusMessage("✅ Complete! Collection deployed with metadata synced.");
+      toast.success("Collection Successfully Deployed!");
+
     } catch (err: any) {
-      console.error("Deployment failed:", err);
-      toast.error(err?.shortMessage || err?.message || "Contract deployment rejected.");
+      console.error("Deploy failed:", err);
+      toast.error(err?.shortMessage || err?.message || "Deployment failed.");
       setStatusMessage(null);
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
+  // ⚡ CUSTOM ART DEPLOYMENT
+  const handleCustomDeploy = async () => {
+    if (!isConnected || !address) return toast.error("Please connect your wallet first!");
+    if (!publicClient) return toast.error("Network RPC client not ready.");
+    if (activeTotalSupply <= 0 || activeTotalSupply > 10) return toast.error("Invalid supply.");
+
+    setIsDeploying(true);
+    setDeployedAddress(null);
+    setTxHash(null);
+
+    try {
+      setStatusMessage("Deploying Contract (Please sign in wallet)...");
+      const royaltyBps = BigInt(Math.round(royaltyPercentage * 100));
+
+      const hash = await writeContractAsync({
+        address: FACTORY_ADDRESS,
+        abi: LAUNCHPAD_FACTORY_ABI,
+        functionName: "launchCollection",
+        args: [
+          name,
+          symbol,
+          BigInt(activeTotalSupply),
+          parseEther(whitelistPrice || "0"),
+          parseEther(publicPrice || "0"),
+          BigInt(maxWlMint),
+          BigInt(maxPubMint),
+          BigInt(maxCreatorAllocation),
+          royaltyBps,
+          customBaseUri // ⚡ User's provided URI
+        ],
+      });
+
+      setTxHash(hash);
+      setStatusMessage("Waiting for Base block confirmation...");
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+      let newAddress: string | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: LAUNCHPAD_FACTORY_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+          if (decoded.eventName === "CollectionLaunched") {
+            newAddress = (decoded.args as any).collectionAddress;
+            break;
+          }
+        } catch (e) {}
+      }
+
+      setDeployedAddress(newAddress && newAddress !== "0x0000000000000000000000000000000000000000" ? newAddress : "Deployed (Check BaseScan)");
+      setStatusMessage("✅ Complete! Custom Collection deployed.");
+      toast.success("Collection Successfully Deployed!");
+
+    } catch (err: any) {
+      console.error("Deploy failed:", err);
+      toast.error(err?.shortMessage || err?.message || "Deployment failed.");
+      setStatusMessage(null);
+    } finally {
+      setIsDeploying(false);
     }
   };
 
@@ -221,7 +259,6 @@ export default function LaunchpadCreatePage() {
           </p>
         </div>
 
-        {/* ⚡ NEW: Mode Toggle */}
         <div className="flex bg-gray-900 p-1 rounded-xl mb-8 border border-gray-800 w-full max-w-md mx-auto">
           <button
             onClick={() => setActiveMode("ai")}
@@ -298,10 +335,8 @@ export default function LaunchpadCreatePage() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left Column Form */}
           <div className="space-y-6 bg-gray-900/60 p-6 rounded-2xl border border-gray-800">
             <h2 className="text-xl font-bold text-gray-200">1. Collection Details</h2>
-
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Collection Name</label>
@@ -377,17 +412,20 @@ export default function LaunchpadCreatePage() {
                 <h2 className="text-xl font-bold text-gray-200 mb-4">2. Supply & Metadata</h2>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Total Supply (Hard Cap)</label>
+                    <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">
+                      Total Supply <span className="text-blue-400">(Max 10 Beta Cap)</span>
+                    </label>
                     <input
                       type="number"
                       min="1"
+                      max="10"
                       value={customSupply}
-                      onChange={(e) => setCustomSupply(Number(e.target.value))}
+                      onChange={(e) => setCustomSupply(Math.min(10, Math.max(1, Number(e.target.value))))}
                       className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-500 font-mono"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">IPFS Base URI (Optional pre-deploy)</label>
+                    <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">IPFS Base URI</label>
                     <input
                       type="text"
                       placeholder="ipfs://QmYourCidHashHere/"
@@ -402,7 +440,6 @@ export default function LaunchpadCreatePage() {
             )}
 
             <h2 className="text-xl font-bold text-gray-200 pt-4 border-t border-gray-800">3. Mint Pricing (ETH)</h2>
-
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Whitelist Price</label>
@@ -427,7 +464,6 @@ export default function LaunchpadCreatePage() {
             </div>
 
             <h2 className="text-xl font-bold text-gray-200 pt-4 border-t border-gray-800">4. Limits & Royalties</h2>
-
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div>
                 <label className="block text-[10px] font-semibold text-gray-400 uppercase mb-1">Max Whitelist</label>
@@ -480,41 +516,32 @@ export default function LaunchpadCreatePage() {
             <div className="pt-4 flex flex-col gap-4">
               {activeMode === "ai" ? (
                 <>
-                  <div className="flex gap-4">
-                    <button
-                      onClick={handleGeneratePreview}
-                      disabled={isGenerating || (statusMessage !== null && !statusMessage.includes("✅"))}
-                      className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-bold py-3 px-4 rounded-xl transition"
-                    >
-                      1. Generate AI Preview
-                    </button>
-
-                    <button
-                      onClick={handleUploadToIPFS}
-                      disabled={isUploading || previewItems.length === 0 || (statusMessage !== null && !statusMessage.includes("✅"))}
-                      className="flex-1 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white font-bold py-3 px-4 rounded-xl transition"
-                    >
-                      2. Pin to IPFS
-                    </button>
-                  </div>
-
                   <button
-                    onClick={handleDeployCollection}
-                    disabled={!aiBaseUri || (statusMessage !== null && !statusMessage.includes("✅"))}
-                    className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-bold py-3.5 px-4 rounded-xl transition cursor-pointer"
+                    onClick={handleGeneratePreview}
+                    disabled={isGenerating || isDeploying}
+                    className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-bold py-3 px-4 rounded-xl transition"
                   >
-                    3. Deploy on Base {aiBaseUri ? "(Ready)" : "(Pin to IPFS First)"}
+                    1. Generate AI Preview
+                  </button>
+                  <button
+                    onClick={handleOneClickDeploy}
+                    disabled={isDeploying || previewItems.length === 0}
+                    className="w-full bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-500 hover:to-emerald-400 disabled:from-gray-700 disabled:to-gray-700 text-white font-black py-4 px-4 rounded-xl transition cursor-pointer shadow-lg shadow-green-900/20"
+                  >
+                    2. One-Click Deploy (Pin + Deploy)
                   </button>
                 </>
               ) : (
                 <button
-                  onClick={handleDeployCollection}
-                  className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl transition shadow-lg shadow-purple-600/20"
+                  onClick={handleCustomDeploy}
+                  disabled={isDeploying}
+                  className="w-full bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white font-bold py-4 px-4 rounded-xl transition shadow-lg shadow-purple-600/20"
                 >
                   Deploy Custom Collection on Base
                 </button>
               )}
             </div>
+
           </div>
 
           {/* Right Column: Preview or Checklist */}
@@ -561,7 +588,6 @@ export default function LaunchpadCreatePage() {
                             {item.tier}
                           </span>
                         </div>
-
                         <div className="relative aspect-square bg-gray-950 overflow-hidden">
                           <img
                             src={item.imageUrl}
@@ -569,7 +595,6 @@ export default function LaunchpadCreatePage() {
                             className="w-full h-full object-cover transition-transform duration-300 hover:scale-105"
                           />
                         </div>
-
                         <div className="p-3 bg-gray-900/40 flex-1 space-y-2">
                           <p className="text-xs font-bold text-gray-200 truncate">
                             {item.metadata?.name || `Token #${item.tokenId}`}
@@ -608,7 +633,7 @@ export default function LaunchpadCreatePage() {
                   <div className="bg-gray-950 border border-gray-800 p-5 rounded-xl shadow-inner">
                     <h3 className="font-bold text-purple-400 mb-2 text-base">3. Set Your Base URI</h3>
                     <p className="leading-relaxed">
-                      Paste the CID hash generated by Pinata into the form to the left, or wait until after deployment to set it from the Admin Dashboard.
+                      Paste the CID hash generated by Pinata into the form to the left. It will be bound to your contract at the exact moment of deployment.
                     </p>
                   </div>
                 </div>

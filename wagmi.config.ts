@@ -1,4 +1,4 @@
-import { http, fallback } from 'wagmi'; // 👈 Add 'fallback' here
+import { http, fallback } from 'wagmi';
 import { baseSepolia } from 'wagmi/chains';
 import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 
@@ -25,10 +25,10 @@ export const config = getDefaultConfig({
     },
   ],
   transports: {
-    // 👇 Use fallback() to cycle through RPCs to prevent rate limiting
+    // 👇 Pure public RPCs. No Alchemy.
     [baseSepolia.id]: fallback([
-      http('https://base-sepolia-rpc.publicnode.com'), // Primary high-limit RPC
-      http('https://sepolia.base.org')                 // Official fallback
+      http('https://base-sepolia-rpc.publicnode.com'), // Primary high-limit public RPC
+      http('https://sepolia.base.org')                 // Official Base fallback
     ]),
   },
 });

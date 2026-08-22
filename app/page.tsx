@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePublicClient } from "wagmi";
 import { LAUNCHPAD_FACTORY_ABI, BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
-import BetaGate from "@/components/BetaGate";
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
@@ -123,7 +122,7 @@ export default function Home() {
   }, [publicClient]);
 
   return (
-    <BetaGate>
+   
       <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-blue-500/30 overflow-hidden relative">
         
         {/* Dynamic Background Effects */}
@@ -307,6 +306,6 @@ export default function Home() {
         </footer>
 
       </div>
-    </BetaGate>
+   
   );
 }

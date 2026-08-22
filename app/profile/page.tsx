@@ -11,7 +11,7 @@ import {
   MARKETPLACE_ABI, 
   MARKETPLACE_ADDRESS 
 } from "@/abi";
-import BetaGate from "@/components/BetaGate";
+
 
 const FACTORY_ADDRESS = "0x253FC033d3639A2d1df017685dB4837aC8C34a2B" as `0x${string}`;
 const FACTORY_DEPLOY_BLOCK = 45796720n;
@@ -602,7 +602,7 @@ export default function ProfilePage() {
   const totalActiveBidsValue = activeOffers.reduce((sum, o) => sum + o.amount, 0n);
 
   return (
-    <BetaGate>
+    
       <div className="min-h-screen bg-[#050505] text-white font-sans pb-24">
         
         <div className="border-b border-gray-800 bg-[#0a0a0a] relative overflow-hidden">
@@ -1044,6 +1044,6 @@ export default function ProfilePage() {
         )}
 
       </div>
-    </BetaGate>
+    
   );
 }

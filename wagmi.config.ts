@@ -25,11 +25,10 @@ export const config = getDefaultConfig({
     },
   ],
   transports: {
-    // 👇 Your dedicated Base API Key goes first, with public nodes as safety fallbacks
+    // 👇 Pure public RPCs. No Alchemy.
     [baseSepolia.id]: fallback([
-      http(process.env.NEXT_PUBLIC_BASE_RPC_URL),      // ⚡ Your dedicated RPC
-      http('https://base-sepolia-rpc.publicnode.com'), // Public fallback 1
-      http('https://sepolia.base.org')                 // Public fallback 2
+      http('https://base-sepolia-rpc.publicnode.com'), // Primary high-limit public RPC
+      http('https://sepolia.base.org')                 // Official Base fallback
     ]),
   },
 });

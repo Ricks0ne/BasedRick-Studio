@@ -17,6 +17,8 @@ interface NFTItem {
   tier: string;
   isListed: boolean;
   price: bigint;
+  description?: string;
+  attributes?: { trait_type: string; value: string | number }[];
 }
 
 export default function CollectionMarketplacePage() {
@@ -42,8 +44,9 @@ export default function CollectionMarketplacePage() {
   const [selectedTiers, setSelectedTiers] = useState<string[]>([]);
   const [sortOption, setSortOption] = useState("price_asc");
   
-  // 🛒 Cart State
+  // 🛒 Cart & Inspection State
   const [cart, setCart] = useState<NFTItem[]>([]);
+  const [inspectToken, setInspectToken] = useState<NFTItem | null>(null);
 
   // Modal States
   const [offerModalToken, setOfferModalToken] = useState<number | null>(null);
@@ -108,19 +111,22 @@ export default function CollectionMarketplacePage() {
           image: "", 
           tier: "Common", 
           isListed, 
-          price 
+          price,
+          description: "",
+          attributes: []
         };
         
         if (uriRes?.status === "success" && uriRes.result) {
           metadataPromises.push(
-            // ⚡ IMPLEMENTED GLOBAL CACHE HERE
             fetchMetadataWithCache(uriRes.result as string).then(meta => {
                const rarityAttr = meta.attributes?.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
                return {
                  ...baseItem,
                  name: meta.name || baseItem.name,
                  image: resolveIpfsUrl(meta.image),
-                 tier: rarityAttr ? String(rarityAttr.value) : "Common"
+                 tier: rarityAttr ? String(rarityAttr.value) : "Common",
+                 description: meta.description || "",
+                 attributes: meta.attributes || []
                };
             }).catch(() => baseItem)
           );
@@ -132,37 +138,53 @@ export default function CollectionMarketplacePage() {
       const resolvedItems = await Promise.all(metadataPromises);
       setItems(resolvedItems.reverse()); 
 
-      // ⚡ FETCH LAST SALE DATA
+      // ⚡ FETCH LAST SALE DATA (RPC 10k Block Limit Fix)
       try {
-        const [purchaseLogs, offerLogs] = await Promise.all([
-          publicClient.getContractEvents({
-            address: MARKETPLACE_ADDRESS,
-            abi: MARKETPLACE_ABI,
-            eventName: "ListingPurchased",
-            args: { nftAddress: collectionAddress },
-            fromBlock: 45796720n, 
-            toBlock: "latest",
-          }),
-          publicClient.getContractEvents({
-            address: MARKETPLACE_ADDRESS,
-            abi: MARKETPLACE_ABI,
-            eventName: "OfferAccepted",
-            args: { nftAddress: collectionAddress },
-            fromBlock: 45796720n,
-            toBlock: "latest",
-          })
-        ]);
+        const currentBlock = await publicClient.getBlockNumber();
+        let foundSalePrice: bigint | null = null;
+        
+        // Scan backwards in batches of 9,900 blocks (to stay safely under the 10,000 limit)
+        // We look back up to 10 batches (approx ~2.5 days of blocks on Base)
+        const MAX_BATCHES = 10;
+        const BATCH_SIZE = 9900n;
+        
+        for (let i = 0; i < MAX_BATCHES; i++) {
+          const toBlock = currentBlock - (BigInt(i) * BATCH_SIZE);
+          const fromBlock = toBlock - BATCH_SIZE > 0n ? toBlock - BATCH_SIZE : 0n;
+          
+          const [purchaseLogs, offerLogs] = await Promise.all([
+            publicClient.getContractEvents({
+              address: MARKETPLACE_ADDRESS,
+              abi: MARKETPLACE_ABI,
+              eventName: "ListingPurchased",
+              args: { nftAddress: collectionAddress },
+              fromBlock, 
+              toBlock,
+            }),
+            publicClient.getContractEvents({
+              address: MARKETPLACE_ADDRESS,
+              abi: MARKETPLACE_ABI,
+              eventName: "OfferAccepted",
+              args: { nftAddress: collectionAddress },
+              fromBlock,
+              toBlock,
+            })
+          ]);
 
-        const allSales = [...purchaseLogs, ...offerLogs].sort((a, b) => 
-          Number(b.blockNumber) - Number(a.blockNumber)
-        );
+          const allSales = [...purchaseLogs, ...offerLogs].sort((a, b) => 
+            Number(b.blockNumber) - Number(a.blockNumber)
+          );
 
-        if (allSales.length > 0) {
-          const newestSale = allSales[0];
-          setLastSalePrice(newestSale.args.price as bigint);
-        } else {
-          setLastSalePrice(null); 
+          if (allSales.length > 0) {
+            // Found the most recent sale! Save it and exit the loop early.
+            foundSalePrice = allSales[0].args.price as bigint;
+            break; 
+          }
+          
+          if (fromBlock === 0n) break; // Reached genesis, stop searching
         }
+        
+        setLastSalePrice(foundSalePrice);
       } catch (logError) {
         console.error("Failed to fetch sale history:", logError);
       }
@@ -235,6 +257,7 @@ export default function CollectionMarketplacePage() {
       
       // Remove from cart if it was there
       setCart(prev => prev.filter(i => i.tokenId !== tokenId));
+      if (inspectToken?.tokenId === tokenId) setInspectToken(null);
       loadMarketplaceData();
     } catch (err: any) { toast.error(err.shortMessage || "Transaction rejected"); }
   };
@@ -244,12 +267,10 @@ export default function CollectionMarketplacePage() {
     if (!isConnected) return toast.error("Connect wallet to buy");
     if (cart.length === 0) return;
 
-    // Calculate total ETH needed and extract the array of token IDs
     const totalCost = cart.reduce((total, item) => total + item.price, BigInt(0));
     const tokenIdsToSweep = cart.map(item => BigInt(item.tokenId));
 
     try {
-      // ONE single signature for the entire cart
       const hash = await writeContractAsync({
         address: MARKETPLACE_ADDRESS, 
         abi: MARKETPLACE_ABI, 
@@ -265,8 +286,8 @@ export default function CollectionMarketplacePage() {
       toast.dismiss(sweepToast);
       toast.success(`🎉 Floor Swept! You bought ${cart.length} items.`);
       
-      setCart([]); // Empty the cart
-      loadMarketplaceData(); // Refresh the grid
+      setCart([]); 
+      loadMarketplaceData(); 
     } catch (err: any) {
       console.error("Sweep failed:", err);
       toast.error(err?.shortMessage || "Transaction rejected.");
@@ -443,12 +464,21 @@ export default function CollectionMarketplacePage() {
                  const inCart = cart.some(c => c.tokenId === item.tokenId);
 
                  return (
-                   <div key={item.tokenId} className={`bg-[#121212] rounded-xl overflow-hidden hover:border-gray-500 transition group flex flex-col relative border ${inCart ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-gray-800'}`}>
+                   <div 
+                     key={item.tokenId} 
+                     onClick={() => setInspectToken(item)} // ⚡ CLICK TO INSPECT
+                     className={`bg-[#121212] rounded-xl overflow-hidden hover:border-gray-500 transition group flex flex-col relative border cursor-pointer ${inCart ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-gray-800'}`}
+                   >
                       
+                      {/* Visual Cue: Expand Icon */}
+                      <div className="absolute top-2 right-2 w-7 h-7 rounded-lg bg-black/75 backdrop-blur border border-gray-700 flex items-center justify-center text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                        <span className="text-xs">⤢</span>
+                      </div>
+
                       {/* Top Trait Badges */}
-                      <div className="absolute top-2 left-2 right-2 flex justify-between z-10 opacity-90">
+                      <div className="absolute top-2 left-2 right-12 flex gap-2 z-10 opacity-90">
                          <span className="bg-black/70 backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-black border border-gray-700">#{item.tokenId}</span>
-                         <span className="bg-gray-900/80 backdrop-blur-md px-2 py-0.5 rounded text-[9px] font-black uppercase border border-gray-700">{item.tier}</span>
+                         <span className="bg-gray-900/80 backdrop-blur-md px-2 py-0.5 rounded text-[9px] font-black uppercase border border-gray-700 truncate">{item.tier}</span>
                       </div>
 
                       <div className="aspect-square bg-black relative overflow-hidden">
@@ -458,18 +488,24 @@ export default function CollectionMarketplacePage() {
                            <div className="w-full h-full flex items-center justify-center text-gray-800 text-xs">No Image</div>
                         )}
                         
-                        {/* ⚡ PRO FEATURE: Cart Toggles & CTAs */}
+                        {/* ⚡ PRO FEATURE: Cart Toggles & CTAs (stopPropagation ensures we don't open modal) */}
                         <div className={`absolute inset-0 bg-black/40 flex flex-col items-center justify-center gap-2 transition duration-200 ${inCart ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                            {item.isListed ? (
                                isOwner ? (
                                   <span className="px-4 py-2 bg-gray-800/90 backdrop-blur text-white text-xs font-bold rounded-lg border border-gray-600">Your Listing</span>
                                ) : (
                                   <>
-                                    <button onClick={() => toggleCartItem(item)} className={`px-6 py-2.5 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition border ${inCart ? 'bg-red-600 hover:bg-red-500 border-red-500' : 'bg-gray-800 hover:bg-gray-700 border-gray-600'}`}>
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); toggleCartItem(item); }} 
+                                      className={`px-6 py-2.5 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition border ${inCart ? 'bg-red-600 hover:bg-red-500 border-red-500' : 'bg-gray-800 hover:bg-gray-700 border-gray-600'}`}
+                                    >
                                       {inCart ? "Remove" : "Add to Cart"}
                                     </button>
                                     {!inCart && (
-                                      <button onClick={() => handleBuy(item.tokenId, item.price)} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition">
+                                      <button 
+                                        onClick={(e) => { e.stopPropagation(); handleBuy(item.tokenId, item.price); }} 
+                                        className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition"
+                                      >
                                         Buy Now
                                       </button>
                                     )}
@@ -477,11 +513,17 @@ export default function CollectionMarketplacePage() {
                                )
                            ) : (
                                isOwner ? (
-                                  <button onClick={() => setListModalToken(item.tokenId)} className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition">
+                                  <button 
+                                    onClick={(e) => { e.stopPropagation(); setListModalToken(item.tokenId); }} 
+                                    className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-black rounded-lg shadow-xl translate-y-4 group-hover:translate-y-0 transition"
+                                  >
                                      List Item
                                   </button>
                                ) : (
-                                  <button onClick={() => setOfferModalToken(item.tokenId)} className="px-6 py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-black rounded-lg shadow-xl border border-gray-600 translate-y-4 group-hover:translate-y-0 transition">
+                                  <button 
+                                    onClick={(e) => { e.stopPropagation(); setOfferModalToken(item.tokenId); }} 
+                                    className="px-6 py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-black rounded-lg shadow-xl border border-gray-600 translate-y-4 group-hover:translate-y-0 transition"
+                                  >
                                      Make Offer
                                   </button>
                                )
@@ -546,10 +588,106 @@ export default function CollectionMarketplacePage() {
         </div>
       )}
 
-      {/* --- MODALS (Offer & List) --- */}
+      {/* ⚡ THE TRAIT INSPECTION MODAL */}
+      {inspectToken !== null && (
+        <div 
+          onClick={() => setInspectToken(null)}
+          className="fixed inset-0 z-[60] bg-black/85 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-fadeIn"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#0f0f0f] border border-gray-800 rounded-3xl w-full max-w-4xl max-h-[90vh] flex flex-col md:flex-row overflow-hidden shadow-2xl relative"
+          >
+            <button onClick={() => setInspectToken(null)} className="absolute top-4 right-4 z-20 w-9 h-9 rounded-full bg-black/70 hover:bg-gray-800 border border-gray-700 text-gray-300 hover:text-white flex items-center justify-center font-bold transition">✕</button>
+
+            {/* Modal Image Half */}
+            <div className="w-full md:w-1/2 bg-black flex items-center justify-center relative min-h-[300px] border-b md:border-b-0 md:border-r border-gray-800">
+              {inspectToken.image ? (
+                <img src={inspectToken.image} alt={inspectToken.name} className="w-full h-full object-contain max-h-[500px]" />
+              ) : (
+                <div className="text-gray-700 font-bold">Image Not Found</div>
+              )}
+              <div className="absolute top-3 left-3 bg-black/70 backdrop-blur px-3 py-1 rounded-lg border border-gray-800 text-xs font-mono font-bold text-white">#{inspectToken.tokenId}</div>
+              
+              {inspectToken.isListed && (
+                <div className="absolute bottom-3 left-3 bg-purple-900/90 border border-purple-600 px-3 py-1 rounded-lg text-xs font-black text-purple-200 shadow-lg">
+                  Listed for {formatEther(inspectToken.price)} ETH
+                </div>
+              )}
+            </div>
+
+            {/* Modal Metadata Half */}
+            <div className="w-full md:w-1/2 flex flex-col max-h-[500px] md:max-h-[700px]">
+              <div className="p-6 border-b border-gray-800 bg-[#121212]">
+                <p className="text-[10px] uppercase font-bold text-blue-400 tracking-wider mb-1">{collectionName || "Collection Asset"}</p>
+                <h2 className="text-2xl font-black text-white truncate pr-6">{inspectToken.name}</h2>
+                <p className="text-xs font-mono text-gray-500 mt-1">
+                  Owner: {inspectToken.owner.slice(0,6)}...{inspectToken.owner.slice(-4)} {userAddress?.toLowerCase() === inspectToken.owner.toLowerCase() && "(You)"}
+                </p>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
+                {inspectToken.description && (
+                  <div>
+                    <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Description</h4>
+                    <p className="text-xs text-gray-300 leading-relaxed bg-black/40 border border-gray-800/80 p-3 rounded-xl">{inspectToken.description}</p>
+                  </div>
+                )}
+
+                <div>
+                  <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2.5">Attributes & Traits ({inspectToken.attributes?.length || 0})</h4>
+                  {inspectToken.attributes && inspectToken.attributes.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {inspectToken.attributes.map((attr, idx) => (
+                        <div key={idx} className="bg-black/50 border border-gray-800/90 rounded-xl p-3 flex flex-col justify-between hover:border-gray-700 transition">
+                          <span className="text-[9px] uppercase font-bold text-gray-500 tracking-wider truncate mb-1">{attr.trait_type}</span>
+                          <span className="text-xs font-bold text-white truncate">{String(attr.value)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-600 italic">No traits available.</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Connected Action Buttons Footer */}
+              <div className="p-4 border-t border-gray-800 bg-[#121212] flex gap-3">
+                {userAddress?.toLowerCase() === inspectToken.owner.toLowerCase() ? (
+                  <button 
+                    onClick={() => { setInspectToken(null); setListModalToken(inspectToken.tokenId); }} 
+                    className="w-full py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-black transition"
+                  >
+                    {inspectToken.isListed ? "Update Listing" : "List for Sale"}
+                  </button>
+                ) : (
+                  <>
+                    {inspectToken.isListed && (
+                      <button 
+                        onClick={() => handleBuy(inspectToken.tokenId, inspectToken.price)} 
+                        className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black transition shadow-lg"
+                      >
+                        Buy Now
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => { setInspectToken(null); setOfferModalToken(inspectToken.tokenId); }} 
+                      className={`py-3 rounded-xl text-xs font-black transition border border-gray-700 bg-gray-900 hover:bg-gray-800 text-white ${inspectToken.isListed ? "px-5" : "w-full"}`}
+                    >
+                      Make Offer
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- QUICK ACTION MODALS (Offer & List) --- */}
       {offerModalToken !== null && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200">
                 <h3 className="text-xl font-bold mb-1 text-white">Make an Offer</h3>
                 <p className="text-xs text-gray-400 mb-6">Place an ETH bid on Token #{offerModalToken}. Escrowed securely.</p>
                 <input type="text" placeholder="Amount in ETH (e.g. 0.05)" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-mono mb-4 focus:border-blue-500 focus:outline-none" />
@@ -571,8 +709,8 @@ export default function CollectionMarketplacePage() {
       )}
 
       {listModalToken !== null && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+            <div className="bg-[#111] border border-gray-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200">
                 <h3 className="text-xl font-bold mb-1 text-white">List for Sale</h3>
                 <p className="text-xs text-gray-400 mb-6">Set a price for Token #{listModalToken}. Includes protocol fees.</p>
                 <input type="text" placeholder="Price in ETH (e.g. 0.1)" value={listPrice} onChange={(e) => setListPrice(e.target.value)} className="w-full bg-black border border-gray-800 p-3 rounded-lg text-white font-mono mb-4 focus:border-purple-500 focus:outline-none" />

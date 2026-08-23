@@ -1,18 +1,23 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { 
   useAccount, 
   useReadContracts, 
+  useReadContract,
   useWriteContract,
   usePublicClient 
 } from "wagmi";
-import { formatEther } from "viem";
+import { formatEther, parseEther } from "viem";
 import { MerkleTree } from "merkletreejs";
 import keccak256 from "keccak256";
 import toast from "react-hot-toast";
-import { BASEDRICK_LAUNCHPAD_ABI } from "@/abi";
+import { 
+  BASEDRICK_LAUNCHPAD_ABI, 
+  MARKETPLACE_ABI, 
+  MARKETPLACE_ADDRESS 
+} from "@/abi";
 // ⚡ IMPORT GLOBAL CACHE
 import { resolveIpfsUrl, fetchMetadataWithCache } from "@/utils/ipfsCache";
 
@@ -45,6 +50,7 @@ export default function CollectionMintPage() {
   const [mintedTokens, setMintedTokens] = useState<MintedToken[]>([]);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [selectedToken, setSelectedToken] = useState<MintedToken | null>(null);
+  const [galleryRefresh, setGalleryRefresh] = useState(0);
 
   const [wlStart, setWlStart] = useState("");
   const [wlEnd, setWlEnd] = useState("");
@@ -201,7 +207,6 @@ export default function CollectionMintPage() {
           
           if (uriRes.status === "success" && uriRes.result) {
             metadataPromises.push(
-              // ⚡ IMPLEMENTED GLOBAL CACHE HERE
               fetchMetadataWithCache(uriRes.result as string).then(meta => {
                 const attrs = meta.attributes || [];
                 const rarityAttr = attrs.find((a: any) => a.trait_type?.toLowerCase() === "rarity tier" || a.trait_type?.toLowerCase() === "tier");
@@ -230,7 +235,7 @@ export default function CollectionMintPage() {
     };
 
     loadMintedTokens();
-  }, [contractAddress, publicClient, totalSupplyStr, onChainBaseUri, uriOptimisticallySet]); 
+  }, [contractAddress, publicClient, totalSupplyStr, onChainBaseUri, uriOptimisticallySet, galleryRefresh]); 
 
   const { merkleTree, userProof, isEligibleForWL, combinedList } = useMemo(() => {
     const newInputs = whitelistInput.split(/[\n,]+/).map((a) => a.trim().toLowerCase()).filter((a) => a.startsWith("0x") && a.length === 42);
@@ -639,119 +644,66 @@ export default function CollectionMintPage() {
             <p className="text-xs mt-1">Be the first to mint and reveal the collection artwork!</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-            {mintedTokens.map((token) => (
-              <div
-                key={token.tokenId}
-                onClick={() => setSelectedToken(token)}
-                className="bg-gray-800/80 border border-gray-700 hover:border-blue-500 rounded-xl overflow-hidden cursor-pointer transition shadow-lg flex flex-col group"
-              >
-                <div className="aspect-square bg-gray-950 overflow-hidden relative">
-                  {token.image ? (
-                    <img
-                      src={token.image}
-                      alt={token.name}
-                      className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 text-[10px] font-bold p-4 text-center">
-                      <span>Image Not Found</span>
-                    </div>
-                  )}
-                  <span className="absolute top-2 left-2 font-mono text-[10px] font-black bg-black/70 backdrop-blur px-2 py-0.5 rounded text-white border border-gray-700">
-                    #{token.tokenId}
-                  </span>
-                  {token.tier && token.tier !== "Unknown" && (
-                    <span className={`absolute top-2 right-2 text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${
-                      token.tier === "Mythic" ? "bg-purple-950/80 text-purple-300 border-purple-500" :
-                      token.tier === "Legendary" ? "bg-amber-950/80 text-amber-300 border-amber-500" :
-                      token.tier === "Epic" ? "bg-pink-950/80 text-pink-300 border-pink-500" :
-                      token.tier === "Rare" ? "bg-blue-950/80 text-blue-300 border-blue-500" :
-                      "bg-gray-900/80 text-gray-300 border-gray-700"
-                    }`}>
-                      {token.tier}
+          <div className="max-h-[650px] overflow-y-auto custom-scrollbar pr-2 pb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {mintedTokens.map((token) => (
+                <div
+                  key={token.tokenId}
+                  onClick={() => setSelectedToken(token)}
+                  className="bg-gray-800/80 border border-gray-700 hover:border-blue-500 rounded-xl overflow-hidden cursor-pointer transition shadow-lg flex flex-col group"
+                >
+                  <div className="aspect-square bg-gray-950 overflow-hidden relative">
+                    {token.image ? (
+                      <img
+                        src={token.image}
+                        alt={token.name}
+                        className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 text-[10px] font-bold p-4 text-center">
+                        <span>Image Not Found</span>
+                      </div>
+                    )}
+                    <span className="absolute top-2 left-2 font-mono text-[10px] font-black bg-black/70 backdrop-blur px-2 py-0.5 rounded text-white border border-gray-700">
+                      #{token.tokenId}
                     </span>
-                  )}
-                </div>
+                    {token.tier && token.tier !== "Unknown" && (
+                      <span className={`absolute top-2 right-2 text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                        token.tier === "Mythic" ? "bg-purple-950/80 text-purple-300 border-purple-500" :
+                        token.tier === "Legendary" ? "bg-amber-950/80 text-amber-300 border-amber-500" :
+                        token.tier === "Epic" ? "bg-pink-950/80 text-pink-300 border-pink-500" :
+                        token.tier === "Rare" ? "bg-blue-950/80 text-blue-300 border-blue-500" :
+                        "bg-gray-900/80 text-gray-300 border-gray-700"
+                      }`}>
+                        {token.tier}
+                      </span>
+                    )}
+                  </div>
 
-                <div className="p-3">
-                  <h4 className="text-xs font-bold text-gray-200 truncate">{token.name}</h4>
-                  {token.owner && (
-                    <p className="text-[10px] font-mono text-gray-400 mt-1 truncate">
-                      Owner: {token.owner.slice(0, 6)}...{token.owner.slice(-4)}
-                    </p>
-                  )}
+                  <div className="p-3">
+                    <h4 className="text-xs font-bold text-gray-200 truncate">{token.name}</h4>
+                    {token.owner && (
+                      <p className="text-[10px] font-mono text-gray-400 mt-1 truncate">
+                        Owner: {token.owner.slice(0, 6)}...{token.owner.slice(-4)}
+                      </p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
       </div>
 
-      {selectedToken && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
-            <div className="relative aspect-square bg-black">
-              {selectedToken.image ? (
-                <img src={selectedToken.image} alt={selectedToken.name} className="w-full h-full object-contain" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-gray-600 font-bold">Image Not Found</div>
-              )}
-              <button
-                onClick={() => setSelectedToken(null)}
-                className="absolute top-3 right-3 bg-black/70 hover:bg-black text-white w-8 h-8 rounded-full flex items-center justify-center border border-gray-700 transition"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4 max-h-80 overflow-y-auto">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="text-xl font-black text-white">{selectedToken.name}</h3>
-                  {selectedToken.owner && (
-                    <a
-                      href={`https://sepolia.basescan.org/address/${selectedToken.owner}`}
-                      target="_blank" rel="noreferrer"
-                      className="text-xs font-mono text-blue-400 hover:underline flex items-center gap-1 mt-0.5"
-                    >
-                      Owner: {selectedToken.owner} ↗
-                    </a>
-                  )}
-                </div>
-                {selectedToken.tier && selectedToken.tier !== "Unknown" && (
-                  <span className="text-xs font-black uppercase px-3 py-1 rounded-full bg-blue-900/40 text-blue-400 border border-blue-700">
-                    {selectedToken.tier}
-                  </span>
-                )}
-              </div>
-
-              {selectedToken.description && (
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  {selectedToken.description}
-                </p>
-              )}
-
-              {selectedToken.attributes && selectedToken.attributes.length > 0 && (
-                <div>
-                  <h4 className="text-xs uppercase font-bold text-gray-400 mb-2">Attributes & Traits</h4>
-                  <div className="grid grid-cols-2 gap-2">
-                    {selectedToken.attributes.map((attr, idx) => (
-                      <div key={idx} className="bg-gray-800 p-2 rounded-lg border border-gray-700">
-                        <p className="text-[10px] uppercase font-bold text-gray-500 truncate">
-                          {attr.trait_type}
-                        </p>
-                        <p className="text-xs font-semibold text-gray-200 truncate">
-                          {attr.value}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* Render the new, upgraded interactive modal */}
+      {selectedToken && contractAddress && (
+        <GalleryTokenModal 
+          token={selectedToken} 
+          contractAddress={contractAddress}
+          collectionName={name}
+          onClose={() => setSelectedToken(null)}
+          onRefresh={() => setGalleryRefresh(prev => prev + 1)}
+        />
       )}
 
       {isOwner && (
@@ -924,6 +876,261 @@ export default function CollectionMintPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// NEW MARKET-INTEGRATED GALLERY MODAL
+// ----------------------------------------------------------------------------
+
+interface GalleryTokenModalProps {
+  token: MintedToken;
+  contractAddress: `0x${string}`;
+  collectionName?: string;
+  onClose: () => void;
+  onRefresh: () => void;
+}
+
+function GalleryTokenModal({ token, contractAddress, collectionName, onClose, onRefresh }: GalleryTokenModalProps) {
+  const { address, isConnected } = useAccount();
+  const publicClient = usePublicClient();
+  const { writeContractAsync } = useWriteContract();
+
+  const [activeAction, setActiveAction] = useState<"view" | "list" | "offer">("view");
+  const [listPrice, setListPrice] = useState("");
+  const [listDuration, setListDuration] = useState<number>(604800);
+  const [offerAmount, setOfferAmount] = useState("");
+  const [offerDuration, setOfferDuration] = useState<number>(604800);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // Fetch real-time marketplace status for this specific token
+  const { data: listingData } = useReadContract({
+    address: MARKETPLACE_ADDRESS,
+    abi: MARKETPLACE_ABI,
+    functionName: "listings",
+    args: [contractAddress, BigInt(token.tokenId)],
+    query: { enabled: !!contractAddress && !!token.tokenId }
+  });
+
+  const isListed = listingData ? Boolean(listingData[3]) : false;
+  const listPriceFormatted = listingData ? formatEther(listingData[1] as bigint) : "0";
+  const seller = listingData ? (listingData[0] as string) : undefined;
+
+  // Determine permissions. If listed in escrow, the seller is the owner.
+  const isOwnerOrSeller = address && (
+    (token.owner && address.toLowerCase() === token.owner.toLowerCase()) || 
+    (seller && address.toLowerCase() === seller.toLowerCase())
+  );
+
+  // Escape key listener to close
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const handleBuyNow = async () => {
+    if (!isConnected) return toast.error("Connect wallet first!");
+    setIsProcessing(true);
+    try {
+      const priceWei = parseEther(listPriceFormatted);
+      const hash = await writeContractAsync({
+        address: MARKETPLACE_ADDRESS,
+        abi: MARKETPLACE_ABI,
+        functionName: "buyItem",
+        args: [contractAddress, BigInt(token.tokenId)],
+        value: priceWei,
+      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
+        loading: `Purchasing Token #${token.tokenId}...`,
+        success: "🎉 Purchased successfully!",
+        error: "Purchase failed.",
+      });
+      onClose(); onRefresh();
+    } catch (err: any) {
+      toast.error(err?.shortMessage || err?.message || "Transaction rejected.");
+    } finally { setIsProcessing(false); }
+  };
+
+  const handleCreateListing = async () => {
+    if (!isConnected) return toast.error("Connect wallet first!");
+    if (!listPrice || isNaN(Number(listPrice)) || Number(listPrice) <= 0) return toast.error("Enter valid price.");
+    setIsProcessing(true);
+    try {
+      const approvalHash = await writeContractAsync({
+        address: contractAddress,
+        abi: BASEDRICK_LAUNCHPAD_ABI,
+        functionName: "approve",
+        args: [MARKETPLACE_ADDRESS, BigInt(token.tokenId)],
+      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash: approvalHash }), {
+        loading: "Approving marketplace...",
+        success: "✅ Approved! Finalizing listing...",
+        error: "Approval failed.",
+      });
+
+      const hash = await writeContractAsync({
+        address: MARKETPLACE_ADDRESS,
+        abi: MARKETPLACE_ABI,
+        functionName: "createListing",
+        args: [contractAddress, BigInt(token.tokenId), parseEther(listPrice), BigInt(listDuration)],
+      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
+        loading: "Listing on marketplace...",
+        success: "🚀 Token listed for sale!",
+        error: "Listing failed.",
+      });
+      onClose(); onRefresh();
+    } catch (err: any) {
+      toast.error(err?.shortMessage || err?.message || "Transaction rejected.");
+    } finally { setIsProcessing(false); }
+  };
+
+  const handleMakeOffer = async () => {
+    if (!isConnected) return toast.error("Connect wallet first!");
+    if (!offerAmount || isNaN(Number(offerAmount)) || Number(offerAmount) <= 0) return toast.error("Enter valid bid.");
+    setIsProcessing(true);
+    try {
+      const offerWei = parseEther(offerAmount);
+      const hash = await writeContractAsync({
+        address: MARKETPLACE_ADDRESS,
+        abi: MARKETPLACE_ABI,
+        functionName: "makeOffer",
+        args: [contractAddress, BigInt(token.tokenId), BigInt(offerDuration)],
+        value: offerWei,
+      });
+      await toast.promise(publicClient!.waitForTransactionReceipt({ hash }), {
+        loading: `Submitting ${offerAmount} ETH bid...`,
+        success: "🤝 Bid locked securely in escrow!",
+        error: "Failed to place bid.",
+      });
+      onClose();
+    } catch (err: any) {
+      toast.error(err?.shortMessage || err?.message || "Transaction rejected.");
+    } finally { setIsProcessing(false); }
+  };
+
+  return (
+    <div 
+      onClick={onClose}
+      className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-fadeIn"
+    >
+      {/* Modal Dialog Body - e.stopPropagation prevents clicks inside the modal from closing it */}
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="bg-[#0f0f0f] border border-gray-800 rounded-3xl w-full max-w-4xl max-h-[90vh] flex flex-col md:flex-row overflow-hidden shadow-2xl relative"
+      >
+        <button onClick={onClose} className="absolute top-4 right-4 z-20 w-9 h-9 rounded-full bg-black/70 hover:bg-gray-800 border border-gray-700 text-gray-300 hover:text-white flex items-center justify-center font-bold transition">✕</button>
+
+        {/* Image Half */}
+        <div className="w-full md:w-1/2 bg-black flex items-center justify-center relative min-h-[300px] border-b md:border-b-0 md:border-r border-gray-800">
+          {token.image ? (
+            <img src={token.image} alt={token.name} className="w-full h-full object-contain max-h-[500px]" />
+          ) : (
+            <div className="text-gray-700 font-bold">Image Not Found</div>
+          )}
+          <div className="absolute top-3 left-3 bg-black/70 backdrop-blur px-3 py-1 rounded-lg border border-gray-800 text-xs font-mono font-bold text-white">#{token.tokenId}</div>
+          
+          {isListed && (
+            <div className="absolute bottom-3 left-3 bg-purple-900/90 border border-purple-600 px-3 py-1 rounded-lg text-xs font-black text-purple-200 shadow-lg">
+              Listed for {listPriceFormatted} ETH
+            </div>
+          )}
+        </div>
+
+        {/* Scrollable Data & Actions Half */}
+        <div className="w-full md:w-1/2 flex flex-col max-h-[500px] md:max-h-[700px]">
+          
+          <div className="p-6 border-b border-gray-800 bg-[#121212]">
+            <p className="text-[10px] uppercase font-bold text-blue-400 tracking-wider mb-1">{collectionName || "Collection Asset"}</p>
+            <h2 className="text-2xl font-black text-white truncate pr-6">{token.name}</h2>
+            {token.owner && (
+              <p className="text-xs font-mono text-gray-500 mt-1">
+                Owner: {token.owner.slice(0,6)}...{token.owner.slice(-4)} {isOwnerOrSeller && "(You)"}
+              </p>
+            )}
+          </div>
+
+          {/* TRAITS CONTAINER - fully scrollable */}
+          <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
+            {token.description && (
+              <div>
+                <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Description</h4>
+                <p className="text-xs text-gray-300 leading-relaxed bg-black/40 border border-gray-800/80 p-3 rounded-xl">{token.description}</p>
+              </div>
+            )}
+
+            <div>
+              <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2.5">Attributes & Traits ({token.attributes?.length || 0})</h4>
+              {token.attributes && token.attributes.length > 0 ? (
+                <div className="grid grid-cols-2 gap-2.5">
+                  {token.attributes.map((attr, idx) => (
+                    <div key={idx} className="bg-black/50 border border-gray-800/90 rounded-xl p-3 flex flex-col justify-between hover:border-gray-700 transition">
+                      <span className="text-[9px] uppercase font-bold text-gray-500 tracking-wider truncate mb-1">{attr.trait_type}</span>
+                      <span className="text-xs font-bold text-white truncate">{String(attr.value)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-600 italic">No traits available.</p>
+              )}
+            </div>
+
+            {/* Quick Listing Form */}
+            {activeAction === "list" && (
+              <div className="bg-[#141414] border border-blue-900/50 p-4 rounded-2xl space-y-3 animate-fadeIn">
+                <h4 className="text-xs font-black text-blue-400 uppercase">Set Listing Price</h4>
+                <input type="text" placeholder="Price in ETH" value={listPrice} onChange={(e) => setListPrice(e.target.value)} className="w-full bg-black border border-gray-800 p-2.5 rounded-xl text-white font-mono text-sm focus:border-blue-500 outline-none" />
+                <select value={listDuration} onChange={(e) => setListDuration(Number(e.target.value))} className="w-full bg-black border border-gray-800 p-2.5 rounded-xl text-white text-xs font-bold focus:border-blue-500 outline-none">
+                  <option value={86400}>1 Day</option><option value={259200}>3 Days</option><option value={604800}>7 Days</option>
+                </select>
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => setActiveAction("view")} className="flex-1 py-2 bg-gray-900 text-gray-400 hover:text-white rounded-lg text-xs font-bold border border-gray-800">Back</button>
+                  <button onClick={handleCreateListing} disabled={isProcessing} className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-black transition">Confirm Listing</button>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Offer Form */}
+            {activeAction === "offer" && (
+              <div className="bg-[#141414] border border-emerald-900/50 p-4 rounded-2xl space-y-3 animate-fadeIn">
+                <h4 className="text-xs font-black text-emerald-400 uppercase">Make an Escrow Offer</h4>
+                <input type="text" placeholder="Offer in ETH" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} className="w-full bg-black border border-gray-800 p-2.5 rounded-xl text-white font-mono text-sm focus:border-emerald-500 outline-none" />
+                <select value={offerDuration} onChange={(e) => setOfferDuration(Number(e.target.value))} className="w-full bg-black border border-gray-800 p-2.5 rounded-xl text-white text-xs font-bold focus:border-emerald-500 outline-none">
+                  <option value={86400}>1 Day Expiration</option><option value={259200}>3 Days Expiration</option><option value={604800}>7 Days Expiration</option>
+                </select>
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => setActiveAction("view")} className="flex-1 py-2 bg-gray-900 text-gray-400 hover:text-white rounded-lg text-xs font-bold border border-gray-800">Back</button>
+                  <button onClick={handleMakeOffer} disabled={isProcessing} className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-black rounded-lg text-xs font-black transition">Submit Bid</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Action Buttons Footer */}
+          {activeAction === "view" && (
+            <div className="p-4 border-t border-gray-800 bg-[#121212] flex gap-3">
+              {isOwnerOrSeller ? (
+                <button onClick={() => setActiveAction("list")} className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black transition">
+                  {isListed ? "Update Price" : "List for Sale"}
+                </button>
+              ) : (
+                <>
+                  {isListed && (
+                    <button onClick={handleBuyNow} disabled={isProcessing} className="flex-1 py-3 bg-white text-black hover:bg-gray-200 rounded-xl text-xs font-black transition">
+                      Buy Now
+                    </button>
+                  )}
+                  <button onClick={() => setActiveAction("offer")} className={`py-3 rounded-xl text-xs font-black transition border border-gray-700 bg-gray-900 hover:bg-gray-800 text-white ${isListed ? "px-5" : "w-full"}`}>
+                    Make Offer
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

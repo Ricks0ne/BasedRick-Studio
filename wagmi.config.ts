@@ -5,7 +5,6 @@ import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 // Import injectedWallet, which safely catches any EVM extension
 import { 
   injectedWallet, 
-  metaMaskWallet, 
   walletConnectWallet 
 } from '@rainbow-me/rainbowkit/wallets';
 
@@ -19,7 +18,6 @@ export const config = getDefaultConfig({
       groupName: 'Supported Wallets',
       wallets: [
         injectedWallet,      // 👈 The universal fix for extension conflicts
-        metaMaskWallet, 
         walletConnectWallet
       ],
     },
